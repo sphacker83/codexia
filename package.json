@@ -1,0 +1,29 @@
+{
+  "name": "codexia",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "node --experimental-strip-types src/infrastructure/telegram/dev-poller-runtime.ts",
+    "dev:web": "env -u TURBOPACK next dev --webpack",
+    "build": "env -u TURBOPACK NODE_ENV=production next build --webpack",
+    "start": "next start",
+    "lint": "eslint",
+    "telegram:poll": "node --experimental-strip-types src/infrastructure/telegram/poller-runtime.ts",
+    "telegram:dev": "node --experimental-strip-types src/infrastructure/telegram/dev-poller-runtime.ts"
+  },
+  "dependencies": {
+    "next": "16.1.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
