@@ -17,7 +17,7 @@ export function AgentSidebar({
         <Link href="/" className="text-lg font-semibold tracking-tight text-[var(--theme-fg)]">
           CodexOS
         </Link>
-        <p className="mt-1 text-xs text-[var(--theme-muted)]">개인 개발 AI 에이전트</p>
+        <p className="mt-1 text-xs text-[var(--theme-muted)]">개발자 친화적인 멀티 에이전트</p>
       </div>
 
       <nav className="flex items-center gap-2">
@@ -31,15 +31,15 @@ export function AgentSidebar({
           href="/agent?new=1"
           className="rounded-md bg-[var(--theme-accent)] px-3 py-2 text-xs font-semibold text-[var(--theme-accent-fg)] transition hover:opacity-90"
         >
-          에이전트
+          워크스페이스
         </Link>
         <ThemeSelector />
       </nav>
 
       <div className="rounded-md border border-[var(--theme-border)] bg-[var(--theme-surface-soft)] px-3 py-2">
-        <p className="text-sm font-semibold">코덱스 에이전트</p>
+        <p className="text-sm font-semibold">Codex 워크스페이스</p>
         <p className="mt-1 text-xs text-[var(--theme-muted)]">
-          메인 화면에서 선택한 테마가 이 페이지에도 동일하게 적용됩니다.
+          세션, 모델, trace를 기준으로 Codex 기반 멀티 에이전트 작업 흐름을 관리합니다.
         </p>
         <p className="mt-2 text-xs text-[var(--theme-muted)]">
           Session ID: {hasValidSessionId ? sessionId : "생성 중..."}

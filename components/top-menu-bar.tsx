@@ -21,7 +21,7 @@ export function TopMenuBar() {
             href="/agent?new=1"
             className="rounded-md bg-[var(--theme-accent)] px-2 py-1.5 text-xs font-semibold text-[var(--theme-accent-fg)] transition hover:opacity-90 sm:px-3"
           >
-            에이전트
+            워크스페이스
           </Link>
           <ThemeSelector />
         </nav>

@@ -3,8 +3,8 @@ import { SessionManager } from "@/components/session-manager";
 
 const statusItems = [
   { label: "세션 저장", value: "JSON 기반" },
-  { label: "응답 방식", value: "Streaming" },
-  { label: "실행 모델", value: "Codex CLI" },
+  { label: "응답 흐름", value: "Streaming Jobs" },
+  { label: "에이전트 성격", value: "개발자 친화적 멀티 에이전트" },
 ];
 
 export default function HomePage() {
@@ -21,12 +21,13 @@ export default function HomePage() {
 
       <div className="relative mx-auto flex w-full max-w-5xl flex-col gap-6">
         <header className="rounded-2xl border border-[var(--theme-border)] bg-[var(--theme-surface)]/95 px-6 py-6">
-          <p className="text-xs font-semibold tracking-[0.2em] text-[var(--theme-muted)]">CODEXOS MVP</p>
+          <p className="text-xs font-semibold tracking-[0.2em] text-[var(--theme-muted)]">CODEXOS WORKSPACE</p>
           <h1 className="mt-3 text-3xl font-semibold leading-tight sm:text-4xl">
-            개인 개발 에이전트 메인 화면
+            개발자 친화적인 멀티 에이전트 워크스페이스
           </h1>
           <p className="mt-3 max-w-2xl text-sm text-[var(--theme-muted)] sm:text-base">
-            프로젝트 진입점입니다. 세션 기반 대화, 스트리밍 응답, Codex 실행을 한곳에서 시작합니다.
+            Codex의 멀티 에이전트 작업 흐름을 웹에서 다루는 진입점입니다. 세션, 스트리밍 응답, 작업 추적,
+            Codex 실행을 한곳에서 관리합니다.
           </p>
 
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
@@ -34,7 +35,7 @@ export default function HomePage() {
               href="/agent?new=1"
               className="inline-flex items-center justify-center rounded-lg bg-[var(--theme-accent)] px-5 py-3 text-sm font-semibold text-[var(--theme-accent-fg)] transition hover:opacity-90"
             >
-              에이전트 시작하기
+              워크스페이스 열기
             </Link>
           </div>
         </header>

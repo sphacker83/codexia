@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "CodexOS",
-  description: "개인 개발 AI 에이전트",
+  description: "개발자 친화적인 멀티 에이전트 워크스페이스",
 };
 
 export default function RootLayout({

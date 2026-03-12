@@ -1,9 +1,9 @@
 # Codexia
 
-Codexia는 개인 개발 작업을 위한 AI 에이전트 웹 애플리케이션입니다.  
+Codexia는 Codex의 개발자 친화적인 멀티 에이전트 작업 흐름을 웹에서 다루기 위한 애플리케이션입니다.  
 웹 UI에서 요청을 받으면 Next.js API가 작업을 생성하고, 서버가 Codex CLI를 실행한 뒤 결과를 스트리밍으로 다시 전달합니다.
 
-이 프로젝트의 핵심 목적은 "채팅 UI"가 아니라 "실행 가능한 개발 에이전트"를 만드는 것입니다.  
+이 프로젝트의 핵심 목적은 단순한 개인 개발용 챗봇이 아니라, 개발자가 세션과 작업을 관리하면서 Codex 기반 멀티 에이전트 실행 흐름을 사용할 수 있는 워크스페이스를 만드는 것입니다.  
 세션 문맥 유지, 스트리밍 응답, 작업 이력 보관, 모델/사고수준 제어, 워크스페이스 보호, Telegram 연동까지 한 저장소 안에서 다룹니다.
 
 ## 왜 만들었나
@@ -13,10 +13,12 @@ Codexia는 개인 개발 작업을 위한 AI 에이전트 웹 애플리케이션
 - 세션 문맥이 불안정하다
 - 코드 작업 흐름과 연결이 약하다
 - 응답 생성 과정과 실행 상태를 추적하기 어렵다
+- 멀티 에이전트 실행 흐름을 UI에서 통제하기 어렵다
 - 개발용 워크스페이스 보호 정책을 넣기 어렵다
 
 Codexia는 이 문제를 다음 방식으로 해결하려고 합니다.
 
+- Codex의 멀티 에이전트 실행 경험을 웹 워크스페이스로 감싼다
 - 세션별 JSON 저장소로 대화 이력을 유지
 - Codex CLI를 서버에서 직접 실행
 - 응답을 SSE로 스트리밍
@@ -26,6 +28,7 @@ Codexia는 이 문제를 다음 방식으로 해결하려고 합니다.
 
 ## 핵심 기능
 
+- Codex 기반 멀티 에이전트 워크스페이스
 - 세션 기반 대화 저장
 - Codex CLI 실행 결과 스트리밍
 - `job` 단위 상태 추적
@@ -140,7 +143,9 @@ Trace 모드가 켜져 있으면 Codex CLI를 JSON 출력 모드로 실행합니
 
 ### 1. Node.js
 
-- Node.js 20 이상 권장
+- Node.js 22 계열 권장
+- 현재 저장소의 개발 스크립트는 `node --experimental-strip-types`를 사용합니다
+- 현재 확인한 로컬 실행 버전은 `v22.18.0`입니다
 
 ### 2. 패키지 매니저
 
@@ -202,8 +207,23 @@ TELEGRAM_REGISTRATION_CODE=CODEXIA-START-REGISTRATION-CODE
 
 ### 5. 개발 서버 실행
 
+웹만 실행하려면:
+
+```bash
+pnpm dev:web
+```
+
+웹과 Telegram poller를 함께 실행하려면:
+
 ```bash
 pnpm dev
+```
+
+`pnpm dev`는 내부적으로 개발 서버와 Telegram poller를 함께 올립니다.  
+Telegram 환경 변수가 아직 없다면 아래처럼 poller 없이 웹만 실행할 수도 있습니다.
+
+```bash
+pnpm dev -- --no-telegram
 ```
 
 기본 접속 주소:
@@ -234,8 +254,8 @@ pnpm dev
 | `TELEGRAM_REGISTRATION_CODE` | 선택 | 최초 등록용 코드 |
 | `TELEGRAM_DEFAULT_TRACE_MODE` | 선택 | Telegram 기본 Trace 모드, 기본값은 활성 |
 | `TELEGRAM_AUTHORIZED_CHATS_FILE` | 선택 | 승인된 chat 저장 파일 경로 |
-| `TELEGRAM_SESSION_OVERRIDES_FILE` | 선택 | chat별 세션 override 저장 파일 경로 |
-| `TELEGRAM_COMPLETION_CURSOR_FILE` | 선택 | 마지막 완료 시각 저장 파일 경로 |
+| `TELEGRAM_SESSION_OVERRIDES_FILE` | 선택 | chat별 현재 세션 선택 상태 저장 파일 경로 |
+| `TELEGRAM_COMPLETION_CURSOR_FILE` | 선택 | chat별 마지막 완료 시점 저장 파일 경로 |
 | `TELEGRAM_EVENT_LOG_FILE` | 선택 | Telegram 이벤트 로그 파일 경로 |
 | `TELEGRAM_SCREENSHOT_TIMEOUT_MS` | 선택 | 원격 웹 캡처 타임아웃 |
 | `TELEGRAM_POLLER_LOCAL_ENDPOINT` | 선택 | 로컬 poller가 요청을 보낼 에이전트 endpoint |
@@ -456,35 +476,58 @@ Telegram endpoint는 이미 구현되어 있습니다.
 - `/ping`
 - `/id`
 
-### 주의
+### 로컬 실행 방식
 
-현재 저장소의 `package.json`에는 아래 스크립트가 정의되어 있습니다.
+현재 Telegram 관련 실행 스크립트는 `scripts/` 폴더가 아니라 `src/infrastructure/telegram/*.ts`를 직접 실행합니다.
 
-- `telegram:poll`
-- `telegram:dev`
+- `pnpm telegram:poll`
+  - Telegram long polling 프로세스만 실행
+- `pnpm telegram:dev`
+  - 개발 서버와 Telegram poller를 함께 실행
+- `pnpm dev`
+  - 현재는 `pnpm telegram:dev`와 같은 역할
 
-하지만 현재 작업트리에는 이 스크립트가 참조하는 `scripts/` 디렉터리가 없습니다.  
-즉, Telegram webhook route 자체는 존재하지만 로컬 poller용 wrapper 스크립트는 현재 상태로는 바로 실행되지 않습니다.
+중요한 점:
+
+- `pnpm dev`는 기본적으로 Telegram poller까지 같이 시작합니다
+- `TELEGRAM_BOT_TOKEN`이 없으면 poller가 종료되고, wrapper 프로세스도 함께 종료됩니다
+- Telegram을 아직 쓰지 않는 로컬 개발이면 `pnpm dev:web` 또는 `pnpm dev -- --no-telegram`이 더 안전합니다
 
 ## 개발 명령어
 
 ```bash
 pnpm dev
+pnpm dev:web
 pnpm build
 pnpm start
 pnpm lint
+pnpm telegram:poll
+pnpm telegram:dev
 ```
 
-현재 `dev`와 `build`는 모두 `--webpack` 플래그를 사용합니다.
+현재 스크립트 의미:
+
+- `pnpm dev`
+  - 개발 서버 + Telegram poller 동시 실행
+- `pnpm dev:web`
+  - 웹 개발 서버만 실행
+- `pnpm telegram:poll`
+  - Telegram long polling만 실행
+- `pnpm telegram:dev`
+  - `pnpm dev`와 동일하게 개발 서버 + poller 동시 실행
+- `pnpm build`
+  - Next.js production build
+- `pnpm start`
+  - Next.js 서버만 실행
+
+현재 웹 런타임은 Turbopack이 아니라 Webpack 경로를 사용합니다.
 
 ```json
 {
-  "dev": "env -u TURBOPACK next dev --webpack",
+  "dev:web": "env -u TURBOPACK next dev --webpack",
   "build": "env -u TURBOPACK NODE_ENV=production next build --webpack"
 }
 ```
-
-즉, 현재 저장소는 Turbopack 대신 Webpack 경로를 기준으로 맞춰져 있습니다.
 
 ## 배포 가이드
 
@@ -512,7 +555,8 @@ pnpm lint
 5. `data/` 디렉터리 쓰기 권한 확인
 6. `pnpm build`
 7. `pnpm start`
-8. 리버스 프록시에서 `/api/*`와 SSE 응답 버퍼링 비활성화
+8. Telegram long polling을 쓸 경우 별도 프로세스로 `pnpm telegram:poll` 실행
+9. 리버스 프록시에서 `/api/*`와 SSE 응답 버퍼링 비활성화
 
 ### 배포 시 특히 확인할 것
 
@@ -521,12 +565,13 @@ pnpm lint
 - `AGENT_PROTECTED_PATHS`가 비밀 파일을 충분히 막는지
 - 프로세스 타임아웃이 작업 시간을 충분히 허용하는지
 - 다중 인스턴스 환경이면 `data/`가 공유 스토리지인지
+- Telegram을 polling으로 운용하면 웹 서버와 poller를 별도 프로세스로 감시할지
 
 ## GitHub 배포용 README로서 강조할 포인트
 
 이 저장소를 공개하거나 팀에 공유할 때는 다음 점이 잘 드러나야 합니다.
 
-- 단순 챗봇이 아니라 "개발 작업 실행형 에이전트"라는 점
+- 단순 챗봇이 아니라 "개발자 친화적인 멀티 에이전트 워크스페이스"라는 점
 - 웹 UI, API, Codex 실행, 세션 저장이 한 흐름으로 묶여 있다는 점
 - Telegram과 워크스페이스 보호 정책까지 포함한 확장성
 - 아직 DB 대신 JSON 저장소를 사용하는 MVP 성격이라는 점
@@ -535,18 +580,34 @@ pnpm lint
 
 - 세션/잡 저장소가 JSON 파일 기반이라 고부하 다중 인스턴스 운영에는 추가 설계가 필요합니다.
 - Codex CLI 경로가 고정되어 있어 환경 이식성이 낮습니다.
-- Telegram local poller wrapper 스크립트는 현재 작업트리에 없습니다.
+- `pnpm dev`가 Telegram poller까지 함께 실행하므로, Telegram 환경 변수가 없으면 웹 개발 서버도 같이 종료될 수 있습니다.
 - 영속 저장소가 SQLite/Redis가 아니라 파일 시스템 기반입니다.
 - 서버리스보다 장시간 프로세스 실행이 가능한 환경에 더 적합합니다.
 
-## 앞으로 확장하기 좋은 방향
+## 추천 로드맵
 
-- SQLite 또는 Redis 기반 상태 저장소
-- 인증/권한 체계 추가
-- 작업 큐 분리
-- Git/파일/터미널 도구 레이어 확장
-- 배포용 Dockerfile 및 process manager 구성
-- 관측성 로그와 운영 대시보드
+README 차원에서 Codexia의 다음 방향을 설명할 때는 아래 기능들이 잘 어울립니다.
+
+1. 멀티 에이전트 오케스트레이션 보드
+   여러 에이전트의 역할, 상태, 현재 작업, 결과를 한 화면에서 추적할 수 있도록 합니다.
+2. 에이전트 역할 프리셋
+   구현, 리뷰, 디버깅, 리팩터링, 문서화 같은 역할을 미리 정의해 개발자가 빠르게 작업을 시작할 수 있게 합니다.
+3. 병렬 작업 분해 및 결과 병합
+   하나의 요청을 여러 서브태스크로 나누어 동시에 실행하고 마지막에 결과를 합치는 멀티 에이전트 흐름을 지원합니다.
+4. Git 브랜치 또는 Worktree 분리 실행
+   에이전트별 작업 공간을 분리해 충돌을 줄이고 실무 적용성을 높입니다.
+5. 변경 승인 및 안전 실행 플로우
+   파일 수정, 명령 실행, 코어 경로 변경 전 승인 단계를 명확히 둬 신뢰성과 안정성을 높입니다.
+6. 코드 리뷰 전용 에이전트
+   구현 후 회귀 위험, 테스트 공백, 설계 문제를 자동 검토하는 리뷰 워크플로우를 추가합니다.
+7. 저장소 메모리와 프로젝트 지식 베이스
+   아키텍처 규칙, 자주 쓰는 명령, 프로젝트 메모를 누적 저장해 다음 세션에서 재사용할 수 있게 합니다.
+8. 백그라운드 작업 큐와 복구 메커니즘
+   장시간 작업, 재시도, 중단 후 복구, 완료 알림을 지원해 실제 작업 도구로 확장합니다.
+9. 결과물 패널과 실행 리포트
+   diff, 로그, 테스트 결과, 생성 파일, 스크린샷을 한곳에 모아 보여줘 작업 가시성을 높입니다.
+10. GitHub 및 CI 연동
+    이슈 처리, PR 초안 작성, 리뷰 코멘트 반영, 실패한 CI 분석까지 개발 워크플로우 전체로 확장합니다.
 
 ## 문서 참고
 

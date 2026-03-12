@@ -123,7 +123,7 @@ export function SessionManager() {
     if (sessions.length === 0) {
       return (
         <p className="text-sm text-[var(--theme-muted)]">
-          저장된 세션이 없습니다. 에이전트 페이지에서 첫 메시지를 보내면 자동 생성됩니다.
+          저장된 세션이 없습니다. 워크스페이스에서 첫 메시지를 보내면 자동 생성됩니다.
         </p>
       );
     }
@@ -171,9 +171,9 @@ export function SessionManager() {
     <section className="rounded-2xl border border-[var(--theme-border)] bg-[var(--theme-surface-soft)] p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
         <div>
-          <h2 className="text-sm font-semibold">GPT 세션 관리</h2>
+          <h2 className="text-sm font-semibold">멀티 에이전트 세션 관리</h2>
           <p className="text-xs text-[var(--theme-muted)]">
-            세션 확인, 이어서 작업, 삭제, 활성 작업 강제 종료를 지원합니다.
+            워크스페이스 세션 확인, 재진입, 삭제, 활성 작업 강제 종료를 지원합니다.
           </p>
         </div>
         <div className="flex gap-2">
