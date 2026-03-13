@@ -53,7 +53,7 @@
 - 산출물: `lib/agent/codex-runner.ts`
 - 작업 체크리스트:
   - [x] `runCodex`에 `model` 옵션 추가
-  - [x] `codex exec -m <model> -` 인자 구성
+  - [x] `codex exec --sandbox danger-full-access -m <model> -` 인자 구성
   - [x] 고정 경로 검증/취소 처리 유지
 - DoD: 요청 모델을 실행 인자에 반영한다.
 - 검증: `pnpm lint` 통과

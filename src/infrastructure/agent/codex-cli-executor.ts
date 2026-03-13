@@ -14,7 +14,12 @@ const LEGACY_FIXED_CODEX_PATHS = [
   "/opt/homebrew/bin/codex",
   "/usr/local/bin/codex",
 ] as const;
-const FIXED_CODEX_BASE_ARGS: readonly string[] = ["exec", "--skip-git-repo-check"];
+const FIXED_CODEX_BASE_ARGS: readonly string[] = [
+  "exec",
+  "--skip-git-repo-check",
+  "--sandbox",
+  "danger-full-access",
+];
 
 type CodexRunnerErrorCode =
   | "COMMAND_NOT_FOUND"
