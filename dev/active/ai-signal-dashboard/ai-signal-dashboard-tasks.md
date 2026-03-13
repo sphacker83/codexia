@@ -11,27 +11,27 @@
 
 ## Phase 1. Storage Spine
 
-- [ ] PostgreSQL 연결 전략 확정
-- [ ] `db/migrations/signals/001_init.sql` 작성
-- [ ] 초기 테이블 생성
-  - [ ] `signal_assets`
-  - [ ] `signal_source_runs`
-  - [ ] `raw_macro_observations`
-  - [ ] `raw_market_bars`
-  - [ ] `raw_sentiment_snapshots`
-  - [ ] `raw_news_items`
-  - [ ] `raw_consensus_snapshots`
-  - [ ] `feature_snapshots`
-  - [ ] `technical_layer_snapshots`
-  - [ ] `signal_snapshots`
-  - [ ] `signal_component_scores`
-  - [ ] `recommendation_runs`
-  - [ ] `recommendation_items`
-  - [ ] `notification_events`
-  - [ ] `pipeline_job_runs`
-- [ ] Next.js read repository 추가
-- [ ] `src/application/signals` 를 DB-backed read path로 전환
-- [ ] health endpoint가 DB 상태를 읽도록 수정
+- [x] PostgreSQL 연결 전략 확정
+- [x] `db/migrations/signals/001_init.sql` 작성
+- [x] 초기 테이블 생성
+  - [x] `signal_assets`
+  - [x] `signal_source_runs`
+  - [x] `raw_macro_observations`
+  - [x] `raw_market_bars`
+  - [x] `raw_sentiment_snapshots`
+  - [x] `raw_news_items`
+  - [x] `raw_consensus_snapshots`
+  - [x] `feature_snapshots`
+  - [x] `technical_layer_snapshots`
+  - [x] `signal_snapshots`
+  - [x] `signal_component_scores`
+  - [x] `recommendation_runs`
+  - [x] `recommendation_items`
+  - [x] `notification_events`
+  - [x] `pipeline_job_runs`
+- [x] Next.js read repository 추가
+- [x] `src/application/signals` 를 DB-backed read path로 전환
+- [x] health endpoint가 DB 상태를 읽도록 수정
 
 ## Phase 2. Python Pipeline Bootstrap
 

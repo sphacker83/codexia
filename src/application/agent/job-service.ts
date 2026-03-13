@@ -720,7 +720,6 @@ async function runJob(jobId: string): Promise<void> {
     try {
       const runner = runAgentCli({
         prompt,
-        timeoutMs: 900_000,
         model: job.model,
         reasoningEffort: job.reasoningEffort,
         jsonOutput: job.trace,

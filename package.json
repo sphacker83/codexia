@@ -8,12 +8,17 @@
     "build": "node --experimental-strip-types src/infrastructure/web/next-runtime.ts build",
     "start": "next start",
     "lint": "eslint",
+    "signals:db:up": "docker compose up -d postgres",
+    "signals:db:tools": "docker compose --profile tools up -d postgres adminer",
+    "signals:db:down": "docker compose down",
+    "signals:migrate": "node --experimental-strip-types src/infrastructure/signals/migrate-runtime.ts",
     "telegram:poll": "node --experimental-strip-types src/infrastructure/telegram/poller-runtime.ts",
     "telegram:dev": "node --experimental-strip-types src/infrastructure/telegram/dev-poller-runtime.ts"
   },
   "dependencies": {
     "next": "16.1.6",
     "next.js": "^1.0.3",
+    "pg": "^8.20.0",
     "pnpm": "^10.32.1",
     "react": "19.2.3",
     "react-dom": "19.2.3"
@@ -21,6 +26,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.18.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

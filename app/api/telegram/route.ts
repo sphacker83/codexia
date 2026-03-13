@@ -40,7 +40,6 @@ const TELEGRAM_API_BASE_URL = "https://api.telegram.org/bot";
 const TELEGRAM_CHAT_TEXT_LIMIT = 4096;
 const TELEGRAM_STATUS_TEXT_LIMIT = 3600;
 const TELEGRAM_POLL_INTERVAL_MS = 1000;
-const TELEGRAM_MAX_WAIT_MS = 15 * 60 * 1000;
 const TELEGRAM_DEFAULT_TRACE_MODE = process.env.TELEGRAM_DEFAULT_TRACE_MODE !== "0";
 const TELEGRAM_SCREENSHOT_TEMP_DIR = path.join(process.cwd(), "data", "telegram-screenshots");
 const TELEGRAM_FILE_DOWNLOAD_DIR = path.join(process.cwd(), "data", "telegram-files");
@@ -1656,12 +1655,19 @@ async function sendTelegramPhoto(
 
 async function editTelegramMessage(chatId: number, messageId: number, text: string): Promise<void> {
   const safeText = text.slice(0, TELEGRAM_CHAT_TEXT_LIMIT);
-  await callTelegramApi("editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
-    text: safeText,
-    disable_web_page_preview: true,
-  });
+  try {
+    await callTelegramApi("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: safeText,
+      disable_web_page_preview: true,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("message is not modified")) {
+      return;
+    }
+    throw error;
+  }
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -1675,7 +1681,7 @@ async function waitForJobAndSendResult(chatId: number, jobId: string, progressMe
   let lastProgress = "";
   let lastStatusTime = 0;
 
-  while (Date.now() - startTime < TELEGRAM_MAX_WAIT_MS) {
+  while (true) {
     const job = await getAgentJob(jobId);
     if (!job) {
       await editTelegramMessage(chatId, progressMessageId, "작업 정보를 찾을 수 없습니다.");
@@ -1698,17 +1704,22 @@ async function waitForJobAndSendResult(chatId: number, jobId: string, progressMe
     if (job.status === "completed" || job.status === "failed") {
       if (job.status === "failed") {
         const reason = job.error?.trim() || "실행 중 오류가 발생했습니다.";
-        const finalMessage = `실행 실패: ${reason}`;
-        await editTelegramMessage(chatId, progressMessageId, finalMessage);
+        await editTelegramMessage(
+          chatId,
+          progressMessageId,
+          `작업 실패 (${elapsed}초)\n오류 내용을 새 메시지로 전송했습니다.`,
+        );
+        await sendTelegramMessage(chatId, `실행 실패: ${reason}`);
         return;
       }
 
       const finalText = job.assistantText.trim() || "응답이 비어 있습니다.";
-      const chunks = splitTelegramText(finalText, TELEGRAM_CHAT_TEXT_LIMIT);
-      await editTelegramMessage(chatId, progressMessageId, chunks[0] || "응답이 비어 있습니다.");
-      for (let i = 1; i < chunks.length; i += 1) {
-        await sendTelegramMessage(chatId, `[${i + 1}/${chunks.length}]\n${chunks[i]}`);
-      }
+      await editTelegramMessage(
+        chatId,
+        progressMessageId,
+        `작업 완료 (${elapsed}초)\n최종 결과를 새 메시지로 전송했습니다.`,
+      );
+      await sendTelegramMessage(chatId, finalText);
       return;
     }
 
@@ -1719,11 +1730,6 @@ async function waitForJobAndSendResult(chatId: number, jobId: string, progressMe
 
     await sleep(TELEGRAM_POLL_INTERVAL_MS);
   }
-
-  await sendTelegramMessage(
-    chatId,
-    `요청 처리 시간이 초과되었습니다. 잠시 후 /status 로 확인하거나 다시 요청해 주세요.`,
-  );
 }
 
 async function handleSignalCommand(chatId: number, origin: string): Promise<void> {
@@ -2630,6 +2636,7 @@ export async function POST(request: Request): Promise<Response> {
             return;
           case "status": {
             const session = await loadSession(sessionId);
+            const sessionTitle = session.title?.trim() || "(미설정)";
             const model = getSessionModel(session.model);
             const reasoning = getSessionReasoning(session.reasoningEffort);
             const activeJobId = session.activeJobId;
@@ -2638,6 +2645,7 @@ export async function POST(request: Request): Promise<Response> {
                 message.chat.id,
                 [
                   `세션: ${sessionId}`,
+                  `세션 제목: ${sessionTitle}`,
                   "현재 진행 중인 작업이 없습니다.",
                   `모델: ${getModelLabel(model)} (${model})`,
                   `사고수준: ${formatReasoningLabel(reasoning)} (${reasoning})`,
@@ -2657,6 +2665,7 @@ export async function POST(request: Request): Promise<Response> {
               message.chat.id,
               [
                 `세션: ${sessionId}`,
+                `세션 제목: ${sessionTitle}`,
                 `작업 상태: ${activeJob.status}`,
                 `작업 ID: ${activeJob.jobId}`,
                 `모델: ${getModelLabel(model)} (${model})`,

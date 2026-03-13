@@ -23,6 +23,7 @@
 - `Codex CLI` (`gpt-5.x` 계열 모델 사용 시)
 - `Gemini CLI` (`gemini-*` 계열 모델 사용 시)
 - `GitHub CLI` (`git`/GitHub 작업까지 에이전트에게 맡길 계획이면 준비)
+- `Docker` (`SignalForge` phase1 PostgreSQL을 compose로 띄울 경우)
 - Telegram까지 쓸 경우 `TELEGRAM_BOT_TOKEN`
 
 꼭 확인:
@@ -119,6 +120,29 @@ pnpm dev -- --no-telegram
 접속:
 
 - 🌐 Web: [http://localhost:3000](http://localhost:3000)
+
+### 6. SignalForge DB 준비
+
+SignalForge live path는 이제 JSON이 아니라 PostgreSQL을 기준으로 읽습니다. 로컬에서는 compose로 DB만 먼저 띄우는 구성이 가장 가볍습니다.
+
+```bash
+pnpm signals:db:up
+pnpm signals:migrate
+```
+
+기본 compose 포트는 `54329` 이고, `.env.local` 예시는 아래와 같습니다.
+
+```env
+DATABASE_URL=postgresql://codexia:codexia@127.0.0.1:54329/codexia
+DATABASE_SSL=0
+SIGNALS_ENABLE_DEMO_MODE=0
+```
+
+운영 확인:
+
+- `GET /api/signals/health`
+  - live snapshot이 아직 없으면 `503 failed`
+  - `SIGNALS_ENABLE_DEMO_MODE=1` 이면 demo fallback 허용
 
 ## 📲 Telegram 기능 먼저 보기
 
@@ -311,12 +335,14 @@ Codexia는 단순히 프롬프트만 보내지 않고, 워크스페이스 경계
 
 | 변수명 | 필수 | 설명 |
 | --- | --- | --- |
+| `DATABASE_URL` | SignalForge live 사용 시 필수 | SignalForge PostgreSQL 연결 문자열입니다. phase1부터 live read path의 기본값입니다. |
+| `DATABASE_SSL` | 선택 | managed PostgreSQL 등 SSL 연결이 필요하면 `1`, `true`, `require` 중 하나로 설정합니다. |
 | `SIGNALS_ENABLE_DEMO_MODE` | 선택 | `1`이면 live snapshot이 없을 때 `data/signals/demo-snapshot.json` 또는 `SIGNALS_SNAPSHOT_FILE` 로 demo fallback을 허용합니다. |
 | `SIGNALS_SNAPSHOT_FILE` | 선택 | demo fallback용 snapshot 파일 경로입니다. 상대 경로는 프로젝트 루트 기준으로 해석되며 로컬 검증용으로만 사용합니다. |
 
 ## 🗂️ 저장 구조
 
-현재 상태는 로컬 JSON 파일로 저장됩니다.
+기본 agent/Telegram 상태는 로컬 JSON 파일에 저장되고, SignalForge live snapshot은 PostgreSQL을 source of truth로 사용합니다.
 
 - `data/sessions/*.json`
 - `data/jobs/*.json`
@@ -327,6 +353,9 @@ Codexia는 단순히 프롬프트만 보내지 않고, 워크스페이스 경계
 - `data/telegram-files/`
 - `data/telegram-screenshots/`
 - `data/telegram-poller-state.json`
+- `db/migrations/signals/*.sql`
+- `signal_delivery_snapshots` (PostgreSQL)
+- `signal_source_runs` (PostgreSQL)
 
 세션에는 다음 정보가 저장됩니다.
 
@@ -355,6 +384,10 @@ pnpm dev:web
 pnpm build
 pnpm start
 pnpm lint
+pnpm signals:db:up
+pnpm signals:db:tools
+pnpm signals:db:down
+pnpm signals:migrate
 pnpm telegram:poll
 pnpm telegram:dev
 ```
@@ -373,6 +406,14 @@ pnpm telegram:dev
   - production build
 - `pnpm start`
   - Next.js 서버 실행
+- `pnpm signals:db:up`
+  - SignalForge용 PostgreSQL 컨테이너 실행
+- `pnpm signals:db:tools`
+  - PostgreSQL + Adminer 실행
+- `pnpm signals:db:down`
+  - compose 정리
+- `pnpm signals:migrate`
+  - `db/migrations/signals` 적용
 
 ## 🚢 배포 메모
 
@@ -398,11 +439,14 @@ pnpm telegram:dev
 - 활성 job 추적과 취소는 현재 프로세스 메모리에 일부 의존합니다.
 - 웹에는 별도 인증이 없으므로 외부 공개 배포 시 인프라 레벨 보호가 필요합니다.
 - `pnpm dev`는 Telegram poller까지 함께 실행하므로, Telegram 환경이 없으면 개발 흐름이 불편할 수 있습니다.
+- SignalForge는 phase1 기준으로 PostgreSQL read spine까지만 들어가 있으며, 실제 수집/계산 파이프라인은 이후 phase에서 추가됩니다.
 
 ## 📚 문서
 
 - 📄 PRD: [`docs/PRD.md`](docs/PRD.md)
 - 🏗️ Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- 🧭 SignalForge Runtime: [`docs/signalforge-runtime.md`](docs/signalforge-runtime.md)
+- 🧠 SignalForge Structure: [`docs/signalforge.md`](docs/signalforge.md)
 - ✍️ Telegram 응답 형식: [`config/telegram-response-style.txt`](config/telegram-response-style.txt)
 
 ## 📄 라이선스

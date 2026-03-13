@@ -10,7 +10,7 @@ import {
 } from "@/src/core/agent/models";
 import { getAgentWorkspaceRoot } from "@/src/core/workspace/policy";
 
-export const DEFAULT_CLI_TIMEOUT_MS = 300_000;
+export const DEFAULT_CLI_TIMEOUT_MS = 900_000;
 export const DEFAULT_CODEX_TIMEOUT_MS = DEFAULT_CLI_TIMEOUT_MS;
 
 const isWindows = process.platform === "win32";
@@ -86,6 +86,33 @@ export interface RunAgentCliResult {
 }
 
 export type RunCodexResult = RunAgentCliResult;
+
+function normalizeTimeoutMs(timeoutMs: number): number | null {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    return DEFAULT_CLI_TIMEOUT_MS;
+  }
+  if (timeoutMs === 0) {
+    return null;
+  }
+  return Math.floor(timeoutMs);
+}
+
+function readCliTimeoutMsFromEnv(): number | undefined {
+  const raw = process.env.AGENT_CLI_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_CLI_TIMEOUT_MS;
+}
+
+export function resolveAgentCliTimeoutMs(timeoutMs?: number): number | null {
+  if (typeof timeoutMs === "number") {
+    return normalizeTimeoutMs(timeoutMs);
+  }
+  const envTimeoutMs = readCliTimeoutMsFromEnv();
+  return normalizeTimeoutMs(envTimeoutMs ?? DEFAULT_CLI_TIMEOUT_MS);
+}
 
 function uniqueNonEmpty(values: ReadonlyArray<string | undefined>): string[] {
   return [...new Set(values.map((value) => value?.trim()).filter(Boolean) as string[])];
@@ -282,11 +309,12 @@ export function getGeminiCommandPath(): string {
 
 export function runAgentCli({
   prompt,
-  timeoutMs = DEFAULT_CLI_TIMEOUT_MS,
+  timeoutMs,
   model,
   reasoningEffort,
   jsonOutput,
 }: RunAgentCliOptions): RunAgentCliResult {
+  const resolvedTimeoutMs = resolveAgentCliTimeoutMs(timeoutMs);
   const config = getRunnerConfig(model);
   const commandPath = resolveRunnerCommandPath(config);
   const workspaceRoot = getAgentWorkspaceRoot();
@@ -318,14 +346,18 @@ export function runAgentCli({
     stderrBuffer += chunk.toString();
   });
 
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
+  const timeout = resolvedTimeoutMs === null
+    ? null
+    : setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, resolvedTimeoutMs);
 
   const processDone = new Promise<void>((resolve, reject) => {
     child.once("error", (error) => {
-      clearTimeout(timeout);
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       reject(
         new AgentCliRunnerError(
           config.runner,
@@ -337,10 +369,12 @@ export function runAgentCli({
     });
 
     child.once("close", (code) => {
-      clearTimeout(timeout);
+      if (timeout) {
+        clearTimeout(timeout);
+      }
 
       if (timedOut) {
-        const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+        const timeoutSeconds = Math.max(1, Math.ceil((resolvedTimeoutMs ?? DEFAULT_CLI_TIMEOUT_MS) / 1000));
         reject(
           new AgentCliRunnerError(
             config.runner,

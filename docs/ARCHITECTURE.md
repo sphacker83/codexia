@@ -2,13 +2,13 @@
 
 ## 1. 개요
 
-Codexia는 Next.js 기반 웹 애플리케이션 위에 로컬 JSON 저장소와 CLI 실행 계층을 얹은 단일 저장소 구조다.
+Codexia는 Next.js 기반 웹 애플리케이션 위에 로컬 JSON 저장소, CLI 실행 계층, 그리고 SignalForge용 PostgreSQL read spine을 얹은 단일 저장소 구조다.
 
 현재 아키텍처의 핵심 특징은 다음과 같다.
 
 - 웹 UI, API, 세션 저장, job 실행이 한 저장소 안에서 함께 동작한다.
 - 실제 AI 실행은 서버가 Codex CLI 또는 Gemini CLI를 child process로 실행하는 방식이다.
-- 장기 실행 상태는 DB가 아니라 `data/` 아래 JSON 파일로 유지한다.
+- agent 세션과 job 상태는 `data/` 아래 JSON 파일로 유지하고, SignalForge live snapshot은 PostgreSQL을 우선 읽는다.
 - 웹은 SSE로 job 이벤트를 구독하고, Telegram은 같은 job 계층을 재사용한다.
 
 ## 2. 시스템 컨텍스트
@@ -16,8 +16,10 @@ Codexia는 Next.js 기반 웹 애플리케이션 위에 로컬 JSON 저장소와
 ```mermaid
 flowchart LR
     User["User"] --> Web["Web UI (/ , /agent)"]
+    User --> Signals["Signal UI (/signals)"]
     User --> Tg["Telegram Bot"]
     Web --> Api["Next.js Route Handlers"]
+    Signals --> Api
     Tg --> Api
     Poller["Telegram Poller Runtime"] --> Api
     Api --> Job["Job Service"]
@@ -26,6 +28,8 @@ flowchart LR
     Runner --> Codex["Codex CLI"]
     Runner --> Gemini["Gemini CLI"]
     Job --> Store["JSON Files (data/sessions, data/jobs, telegram state)"]
+    Api --> SignalRepo["Signal Read Repository"]
+    SignalRepo --> Pg["PostgreSQL (SignalForge)"]
     Api --> SSE["SSE Stream Response"]
     SSE --> Web
 ```
@@ -37,7 +41,7 @@ flowchart LR
 - Language: TypeScript 5
 - Styling: Tailwind CSS 4
 - Runtime: Node.js Route Handlers + Node child_process
-- Storage: Local JSON files
+- Storage: Local JSON files + PostgreSQL (SignalForge live data)
 - Integration: Telegram Bot API
 
 ## 4. 디렉터리 구조
@@ -49,6 +53,7 @@ app/
 components/
 config/
 data/
+db/
 docs/
 lib/
   theme/
@@ -69,6 +74,8 @@ src/
   - Telegram 응답 스타일 프롬프트 등 설정 파일
 - `data`
   - 세션, job, Telegram 상태, 첨부 파일, 로그 저장소
+- `db`
+  - SignalForge migration SQL
 - `src/core`
   - 타입, 모델 정의, 프롬프트/정책 계산
 - `src/application`
@@ -115,6 +122,10 @@ src/
   - Codex/Gemini CLI 경로 해석, child process 실행, stdout stream 제공
 - `infrastructure/agent/session-file-store.ts`
   - 세션 파일 읽기/쓰기/삭제/요약
+- `infrastructure/db/postgres.ts`
+  - SignalForge PostgreSQL connection pool
+- `infrastructure/signals/postgres-signal-repository.ts`
+  - SignalForge live snapshot / source health read model
 - `infrastructure/web/next-runtime.ts`
   - `next dev/build --webpack` 래퍼, `TURBOPACK` 제거
 - `infrastructure/telegram/poller-runtime.ts`
@@ -289,10 +300,18 @@ trace 모드에서 UI가 해석하는 핵심 이벤트는 다음과 같다.
 - `data/telegram-screenshots/`
 - `data/telegram-poller-state.json`
 
+SignalForge live read는 별도 PostgreSQL 테이블을 사용한다.
+
+- `signal_delivery_snapshots`
+- `signal_source_runs`
+- `signal_snapshots`
+- `recommendation_runs`
+- `recommendation_items`
+
 설계 의도:
 
 - 사람 읽기 가능한 포맷으로 디버깅을 쉽게 한다.
-- MVP 단계에서 외부 DB 의존성을 피한다.
+- agent runtime은 파일 기반으로 단순성을 유지하고, SignalForge만 먼저 DB spine으로 옮긴다.
 
 트레이드오프:
 
