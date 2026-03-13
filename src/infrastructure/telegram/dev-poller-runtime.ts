@@ -2,21 +2,21 @@
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 
-const childProcess = require("node:child_process") as typeof import("node:child_process");
-const spawn = childProcess.spawn;
+const nodeChildProcess = require("node:child_process") as typeof import("node:child_process");
+const nodePath = require("node:path") as typeof import("node:path");
+const spawnChild = nodeChildProcess.spawn;
 type ChildProcess = import("node:child_process").ChildProcess;
 
-const isWindows = process.platform === "win32";
-const npmCmd = isWindows ? "npm.cmd" : "npm";
 const argv = new Set(process.argv.slice(2));
 const shouldRunTelegram = !argv.has("--no-telegram");
+const runtimeArgs = ["--experimental-strip-types"];
 
 const processes: ChildProcess[] = [];
 let shuttingDown = false;
 let forcedExitCode = 0;
 
-function startProcess(name: string, args: string[]): ChildProcess {
-  const proc = spawn(npmCmd, args, {
+function startProcess(name: string, scriptPath: string, args: string[] = []): ChildProcess {
+  const proc = spawnChild(process.execPath, [...runtimeArgs, nodePath.resolve(process.cwd(), scriptPath), ...args], {
     stdio: "inherit",
     shell: false,
     env: process.env,
@@ -104,10 +104,10 @@ function runTelegramDevPoller(): void {
     console.log("[dev:telegram] starting dev server only (--no-telegram)...");
   }
 
-  startProcess("next:dev", ["run", "dev:web"]);
+  startProcess("next:dev", "src/infrastructure/web/next-runtime.ts", ["dev"]);
 
   if (shouldRunTelegram) {
-    startProcess("telegram:poll", ["run", "telegram:poll"]);
+    startProcess("telegram:poll", "src/infrastructure/telegram/poller-runtime.ts");
   }
 }
 

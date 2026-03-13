@@ -3,7 +3,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 const fs = require("node:fs/promises") as typeof import("node:fs/promises");
-const path = require("node:path") as typeof import("node:path");
+const nodePath = require("node:path") as typeof import("node:path");
 
 interface TelegramChat {
   id?: number | null;
@@ -32,7 +32,7 @@ interface TelegramApiResponse<T> {
   description?: string;
 }
 
-const TELEGRAM_EVENT_LOG_FILE = path.resolve(
+const TELEGRAM_EVENT_LOG_FILE = nodePath.resolve(
   process.cwd(),
   process.env.TELEGRAM_EVENT_LOG_FILE?.trim() || "data/telegram-events.log",
 );
@@ -42,7 +42,7 @@ async function appendPollerEventLog(
   details: Record<string, unknown> = {},
 ): Promise<void> {
   try {
-    await fs.mkdir(path.dirname(TELEGRAM_EVENT_LOG_FILE), { recursive: true });
+    await fs.mkdir(nodePath.dirname(TELEGRAM_EVENT_LOG_FILE), { recursive: true });
     const record = {
       time: new Date().toISOString(),
       source: "telegram-poller",
@@ -53,6 +53,34 @@ async function appendPollerEventLog(
   } catch {
     // Polling logs are non-critical.
   }
+}
+
+function stripInlineComment(value: string): string {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+
+    if (char === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (char === "\"" && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (char === "#" && !inSingleQuote && !inDoubleQuote) {
+      const previous = index === 0 ? " " : value[index - 1];
+      if (/\s/.test(previous)) {
+        return value.slice(0, index).trim();
+      }
+    }
+  }
+
+  return value.trim();
 }
 
 async function loadEnvFile(filePath = ".env.local"): Promise<void> {
@@ -70,7 +98,7 @@ async function loadEnvFile(filePath = ".env.local"): Promise<void> {
       }
 
       const key = trimmed.slice(0, equalIndex).trim();
-      let value = trimmed.slice(equalIndex + 1).trim();
+      let value = stripInlineComment(trimmed.slice(equalIndex + 1).trim());
 
       if (
         (value.startsWith("\"") && value.endsWith("\"")) ||
@@ -86,6 +114,28 @@ async function loadEnvFile(filePath = ".env.local"): Promise<void> {
   } catch {
     // Missing env file is allowed.
   }
+}
+
+function getTelegramBotToken(): string {
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim() || "";
+
+  if (!token) {
+    throw new Error("TELEGRAM_BOT_TOKEN is required.");
+  }
+
+  if (token.toLowerCase().startsWith("bot")) {
+    throw new Error(
+      "TELEGRAM_BOT_TOKEN must not include the leading 'bot' prefix.",
+    );
+  }
+
+  if (/\s|#/.test(token)) {
+    throw new Error(
+      "TELEGRAM_BOT_TOKEN looks invalid. Remove inline comments or whitespace from .env.local.",
+    );
+  }
+
+  return token;
 }
 
 function toInt(value: string | undefined, fallback: number): number {
@@ -119,7 +169,7 @@ async function readOffset(statePath: string): Promise<number> {
 
 async function writeOffset(statePath: string, nextOffset: number): Promise<void> {
   const payload = `${JSON.stringify({ nextOffset, updatedAt: new Date().toISOString() })}\n`;
-  await fs.mkdir(path.dirname(statePath), { recursive: true });
+  await fs.mkdir(nodePath.dirname(statePath), { recursive: true });
   await fs.writeFile(statePath, payload, "utf8");
 }
 
@@ -195,10 +245,7 @@ async function deleteWebhook(token: string): Promise<void> {
 async function runTelegramPoller(): Promise<void> {
   await loadEnvFile();
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken) {
-    throw new Error("TELEGRAM_BOT_TOKEN is required.");
-  }
+  const botToken = getTelegramBotToken();
 
   const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET?.trim() || "";
   const localEndpoint =
@@ -207,7 +254,7 @@ async function runTelegramPoller(): Promise<void> {
   const pollIntervalMs = toInt(process.env.TELEGRAM_POLLER_POLL_INTERVAL_MS, 1200);
   const statePath =
     process.env.TELEGRAM_POLLER_STATE_FILE?.trim() ||
-    path.join(process.cwd(), "data", "telegram-poller-state.json");
+    nodePath.join(process.cwd(), "data", "telegram-poller-state.json");
   const deleteWebhookOnStart = process.env.TELEGRAM_POLLER_DELETE_WEBHOOK === "1";
 
   if (deleteWebhookOnStart) {

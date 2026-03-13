@@ -161,6 +161,8 @@ Trace 모드가 켜져 있으면 Codex CLI를 JSON 출력 모드로 실행합니
 - `/Users/ethan/.npm-global/bin/codex`
 - `/opt/homebrew/bin/codex`
 - `/usr/local/bin/codex`
+- `CODEX_CLI_PATH` or `CODEX_PATH`
+- `PATH` lookup for `codex`, `codex.exe`, `codex.cmd`
 
 코드가 임의 PATH 검색을 하지 않기 때문에, Codex CLI가 다른 위치에 있다면 다음 중 하나가 필요합니다.
 
@@ -524,8 +526,8 @@ pnpm telegram:dev
 
 ```json
 {
-  "dev:web": "env -u TURBOPACK next dev --webpack",
-  "build": "env -u TURBOPACK NODE_ENV=production next build --webpack"
+  "dev:web": "node --experimental-strip-types src/infrastructure/web/next-runtime.ts dev",
+  "build": "node --experimental-strip-types src/infrastructure/web/next-runtime.ts build"
 }
 ```
 

@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "node --experimental-strip-types src/infrastructure/telegram/dev-poller-runtime.ts",
-    "dev:web": "env -u TURBOPACK next dev --webpack",
-    "build": "env -u TURBOPACK NODE_ENV=production next build --webpack",
+    "dev:web": "node --experimental-strip-types src/infrastructure/web/next-runtime.ts dev",
+    "build": "node --experimental-strip-types src/infrastructure/web/next-runtime.ts build",
     "start": "next start",
     "lint": "eslint",
     "telegram:poll": "node --experimental-strip-types src/infrastructure/telegram/poller-runtime.ts",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "next": "16.1.6",
+    "next.js": "^1.0.3",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
