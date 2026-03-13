@@ -5,6 +5,7 @@ import {
   SUPPORTED_MODELS,
   getModelLabel,
   isSupportedModel,
+  modelSupportsReasoningEffort,
 } from "@/src/core/agent/models";
 import {
   DEFAULT_REASONING_EFFORT,
@@ -73,6 +74,7 @@ export function AgentComposer({ viewModel }: { viewModel: AgentChatViewModel }) 
   } = viewModel;
 
   const isSendDisabled = !hasValidSessionId || isLoading || inputLength === 0;
+  const supportsReasoningEffort = modelSupportsReasoningEffort(selectedModel);
 
   return (
     <form className={`mt-3 shrink-0 bg-transparent ${INPUT_PANEL_WIDTH_CLASS}`} onSubmit={handleSubmit}>
@@ -181,7 +183,12 @@ export function AgentComposer({ viewModel }: { viewModel: AgentChatViewModel }) 
                 setSelectedReasoningEffort(event.target.value || DEFAULT_REASONING_EFFORT);
               }
             }}
-            disabled={isLoading}
+            disabled={isLoading || !supportsReasoningEffort}
+            title={
+              supportsReasoningEffort
+                ? undefined
+                : "Gemini CLI does not support reasoning-effort overrides."
+            }
             className="rounded-md border border-[var(--theme-border)] bg-[var(--theme-surface-soft)] px-2 py-1 text-xs text-[var(--theme-fg)] outline-none focus:border-2 focus:border-[var(--theme-accent)] focus:ring-0 disabled:opacity-60"
           >
             {SUPPORTED_REASONING_EFFORTS.map((reasoningEffort) => (

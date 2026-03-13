@@ -3,9 +3,9 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import {
-  isCodexRunnerError,
-  runCodex,
-  type RunCodexResult,
+  isAgentCliRunnerError,
+  runAgentCli,
+  type RunAgentCliResult,
 } from "@/src/infrastructure/agent/codex-cli-executor";
 import {
   DEFAULT_SYSTEM_PROMPT,
@@ -62,6 +62,31 @@ interface CodexJsonEvent {
     exit_code?: number | null;
   };
   usage?: AgentJobUsage;
+}
+
+interface GeminiTraceStats {
+  input_tokens?: number;
+  output_tokens?: number;
+  cached?: number;
+}
+
+interface GeminiTraceEvent {
+  type?: "init" | "message" | "tool_use" | "tool_result" | "error" | "result";
+  role?: "user" | "assistant";
+  content?: string;
+  message?: string;
+  delta?: boolean;
+  tool_name?: string;
+  tool_id?: string;
+  parameters?: Record<string, unknown>;
+  status?: "success" | "error";
+  output?: string;
+  severity?: "warning" | "error";
+  error?: {
+    type?: string;
+    message?: string;
+  };
+  stats?: GeminiTraceStats;
 }
 
 class ActiveJobError extends Error {
@@ -275,11 +300,23 @@ function recordFirstByteLatency(job: AgentJob, startedAtMs: number, mode: "fast"
 
 async function executeTraceJob(
   job: AgentJob,
-  prompt: string,
   startedAtMs: number,
-  codex: RunCodexResult,
+  runner: RunAgentCliResult,
 ): Promise<void> {
-  const reader = codex.stream.getReader();
+  if (runner.runner === "gemini") {
+    await executeGeminiTraceJob(job, startedAtMs, runner);
+    return;
+  }
+
+  await executeCodexTraceJob(job, startedAtMs, runner);
+}
+
+async function executeCodexTraceJob(
+  job: AgentJob,
+  startedAtMs: number,
+  runner: RunAgentCliResult,
+): Promise<void> {
+  const reader = runner.stream.getReader();
   const decoder = new TextDecoder();
   let lineBuffer = "";
   let ttfbLogged = false;
@@ -363,7 +400,152 @@ async function executeTraceJob(
     if (lineBuffer.trim()) {
       await handleJsonLine(lineBuffer);
     }
-    await codex.completed;
+    await runner.completed;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function formatGeminiToolLabel(event: GeminiTraceEvent): string {
+  const toolName = event.tool_name?.trim() || "tool";
+  if (!event.parameters || Object.keys(event.parameters).length === 0) {
+    return toolName;
+  }
+
+  const rawParameters = JSON.stringify(event.parameters);
+  const suffix = rawParameters.length > 120 ? `${rawParameters.slice(0, 117)}...` : rawParameters;
+  return `${toolName} ${suffix}`;
+}
+
+function toGeminiUsage(stats?: GeminiTraceStats): AgentJobUsage | undefined {
+  if (!stats) {
+    return undefined;
+  }
+
+  return {
+    input_tokens: stats.input_tokens || 0,
+    cached_input_tokens: stats.cached || 0,
+    output_tokens: stats.output_tokens || 0,
+  };
+}
+
+async function executeGeminiTraceJob(
+  job: AgentJob,
+  startedAtMs: number,
+  runner: RunAgentCliResult,
+): Promise<void> {
+  const reader = runner.stream.getReader();
+  const decoder = new TextDecoder();
+  const activeToolLabels = new Map<string, string>();
+  let lineBuffer = "";
+  let ttfbLogged = false;
+
+  const handleJsonLine = async (line: string): Promise<void> => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    let event: GeminiTraceEvent;
+    try {
+      event = JSON.parse(trimmed) as GeminiTraceEvent;
+    } catch {
+      return;
+    }
+
+    if (event.type === "message" && event.role === "assistant" && event.content) {
+      job.assistantText += event.content;
+      await persistJob(job);
+      return;
+    }
+
+    if (event.type === "tool_use") {
+      const command = formatGeminiToolLabel(event);
+      if (event.tool_id) {
+        activeToolLabels.set(event.tool_id, command);
+      }
+      appendEvent(job, {
+        type: "command",
+        command,
+        status: "in_progress",
+      });
+      await persistJob(job);
+      return;
+    }
+
+    if (event.type === "tool_result") {
+      const command =
+        (event.tool_id ? activeToolLabels.get(event.tool_id) : undefined) || "tool";
+      appendEvent(job, {
+        type: "command",
+        command,
+        status: "completed",
+      });
+      if (event.tool_id) {
+        activeToolLabels.delete(event.tool_id);
+      }
+      if (event.status === "error" && event.error?.message) {
+        appendEvent(job, { type: "reasoning", text: event.error.message });
+      }
+      await persistJob(job);
+      return;
+    }
+
+    if (event.type === "error" && event.message) {
+      if (event.severity === "warning") {
+        appendEvent(job, { type: "reasoning", text: event.message });
+      } else {
+        appendEvent(job, { type: "error", message: event.message });
+      }
+      await persistJob(job);
+      return;
+    }
+
+    if (event.type === "result") {
+      const usage = toGeminiUsage(event.stats);
+      if (usage) {
+        job.usage = usage;
+        appendEvent(job, { type: "usage", usage });
+      }
+      if (event.status === "error" && event.error?.message) {
+        appendEvent(job, { type: "error", message: event.error.message });
+      }
+      await persistJob(job);
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      const chunk = decoder.decode(value, { stream: true });
+      if (!chunk) {
+        continue;
+      }
+      if (!ttfbLogged) {
+        ttfbLogged = true;
+        recordFirstByteLatency(job, startedAtMs, "trace");
+        await persistJob(job);
+      }
+      lineBuffer += chunk;
+      while (true) {
+        const newlineIndex = lineBuffer.indexOf("\n");
+        if (newlineIndex < 0) {
+          break;
+        }
+        const line = lineBuffer.slice(0, newlineIndex);
+        lineBuffer = lineBuffer.slice(newlineIndex + 1);
+        await handleJsonLine(line);
+      }
+    }
+    lineBuffer += decoder.decode();
+    if (lineBuffer.trim()) {
+      await handleJsonLine(lineBuffer);
+    }
+    await runner.completed;
   } finally {
     reader.releaseLock();
   }
@@ -371,11 +553,10 @@ async function executeTraceJob(
 
 async function executeFastJob(
   job: AgentJob,
-  prompt: string,
   startedAtMs: number,
-  codex: RunCodexResult,
+  runner: RunAgentCliResult,
 ): Promise<void> {
-  const reader = codex.stream.getReader();
+  const reader = runner.stream.getReader();
   const decoder = new TextDecoder();
   let ttfbLogged = false;
 
@@ -399,7 +580,7 @@ async function executeFastJob(
       await persistJob(job);
     }
     job.assistantText += decoder.decode();
-    await codex.completed;
+    await runner.completed;
   } finally {
     reader.releaseLock();
   }
@@ -459,19 +640,19 @@ async function runJob(jobId: string): Promise<void> {
     const startedAtMs = Date.parse(job.startedAt || nowIso());
 
     try {
-      const codex = runCodex({
+      const runner = runAgentCli({
         prompt,
         timeoutMs: 900_000,
         model: job.model,
         reasoningEffort: job.reasoningEffort,
         jsonOutput: job.trace,
       });
-      runningJobCancels.set(job.jobId, codex.cancel);
+      runningJobCancels.set(job.jobId, runner.cancel);
 
       if (job.trace) {
-        await executeTraceJob(job, prompt, startedAtMs, codex);
+        await executeTraceJob(job, startedAtMs, runner);
       } else {
-        await executeFastJob(job, prompt, startedAtMs, codex);
+        await executeFastJob(job, startedAtMs, runner);
       }
 
       if (isJobCancelled(job.jobId)) {
@@ -500,8 +681,8 @@ async function runJob(jobId: string): Promise<void> {
         return;
       }
 
-      let message = toErrorMessage(error, "Codex execution failed.");
-      if (isCodexRunnerError(error) && error.detail) {
+      let message = toErrorMessage(error, "Agent CLI execution failed.");
+      if (isAgentCliRunnerError(error) && error.detail) {
         message = `${message} | ${error.detail}`;
       }
       try {
