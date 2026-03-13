@@ -4,7 +4,7 @@ export type SignalRecommendationStyle = SignalStyle;
 
 export type SignalSnapshotMode = "demo" | "live";
 
-export type SignalSourceStatus = "healthy" | "degraded" | "stale" | "demo";
+export type SignalSourceStatus = "healthy" | "degraded" | "stale" | "demo" | "failed";
 
 export type MarketRegime =
   | "Risk-On"
@@ -269,6 +269,8 @@ export interface SignalBriefingResponse {
 
 export interface SignalHealthResponse {
   dataMode: SignalSnapshotMode;
+  snapshotMode?: SignalSnapshotMode;
+  demo?: boolean;
   generatedAt: string;
   stale: boolean;
   health: SignalHealthBlockResponse;

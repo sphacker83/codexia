@@ -41,6 +41,7 @@ const CANCEL_MESSAGE = "작업이 사용자에 의해 취소되었습니다.";
 const STALE_JOB_MESSAGE = "작업 실행이 중단되어 자동으로 실패 처리되었습니다.";
 const JOB_HEARTBEAT_INTERVAL_MS = 5_000;
 const JOB_STALE_TIMEOUT_MS = 45_000;
+const JOB_OWNER_GRACE_TIMEOUT_MS = 15 * 60 * 1000;
 const PROCESS_OWNER_ID = `pid:${process.pid}:${randomUUID().slice(0, 8)}`;
 
 interface CreateAgentJobInput {
@@ -101,6 +102,7 @@ class ActiveJobError extends Error {
 const runningJobIds = new Set<string>();
 const runningJobCancels = new Map<string, () => void>();
 const cancelledJobIds = new Set<string>();
+const jobWriteQueues = new Map<string, Promise<void>>();
 
 type AgentJobEventInput = AgentJobEvent extends infer T
   ? T extends AgentJobEvent
@@ -193,7 +195,22 @@ function appendEvent(job: AgentJob, event: AgentJobEventInput): AgentJobEvent {
 
 async function persistJob(job: AgentJob): Promise<void> {
   job.updatedAt = nowIso();
-  await writeJobFile(job);
+  const pendingWrite = jobWriteQueues.get(job.jobId) ?? Promise.resolve();
+  const nextWrite = pendingWrite
+    .catch(() => undefined)
+    .then(async () => {
+      await writeJobFile(job);
+    });
+
+  jobWriteQueues.set(job.jobId, nextWrite);
+
+  try {
+    await nextWrite;
+  } finally {
+    if (jobWriteQueues.get(job.jobId) === nextWrite) {
+      jobWriteQueues.delete(job.jobId);
+    }
+  }
 }
 
 function isActiveJobStatus(status: AgentJobStatus): boolean {
@@ -205,6 +222,41 @@ function getLeaseTimestamp(job: AgentJob): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
+function parseOwnerPid(ownerId?: string): number | null {
+  if (!ownerId?.startsWith("pid:")) {
+    return null;
+  }
+
+  const [, rawPid] = ownerId.split(":", 3);
+  const pid = Number.parseInt(rawPid || "", 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      ((error as NodeJS.ErrnoException).code === "ESRCH" ||
+        (error as NodeJS.ErrnoException).code === "ENOENT")
+    ) {
+      return false;
+    }
+    return true;
+  }
+}
+
+function hasLiveOwnerProcess(job: AgentJob): boolean {
+  const pid = parseOwnerPid(job.ownerId);
+  if (!pid) {
+    return false;
+  }
+  return isProcessAlive(pid);
+}
+
 function isStaleJob(job: AgentJob): boolean {
   if (!isActiveJobStatus(job.status)) {
     return false;
@@ -212,7 +264,11 @@ function isStaleJob(job: AgentJob): boolean {
   if (runningJobIds.has(job.jobId)) {
     return false;
   }
-  return Date.now() - getLeaseTimestamp(job) > JOB_STALE_TIMEOUT_MS;
+  const leaseAgeMs = Date.now() - getLeaseTimestamp(job);
+  if (hasLiveOwnerProcess(job)) {
+    return leaseAgeMs > JOB_OWNER_GRACE_TIMEOUT_MS;
+  }
+  return leaseAgeMs > JOB_STALE_TIMEOUT_MS;
 }
 
 async function clearSessionActiveJobIfMatches(sessionId: string, jobId: string): Promise<void> {
@@ -224,19 +280,31 @@ async function clearSessionActiveJobIfMatches(sessionId: string, jobId: string):
 }
 
 async function recoverStaleJob(job: AgentJob, errorMessage: string = STALE_JOB_MESSAGE): Promise<AgentJob> {
-  if (!isStaleJob(job)) {
+  const latestJob = await readJobFile(job.jobId);
+  if (!latestJob) {
     return job;
   }
+  if (!isStaleJob(latestJob)) {
+    return latestJob;
+  }
 
-  job.status = "failed";
-  job.error = errorMessage;
-  job.completedAt = nowIso();
-  job.heartbeatAt = nowIso();
-  appendEvent(job, { type: "error", message: errorMessage });
-  await persistJob(job);
-  await appendMessage(job.sessionId, createMessage("assistant", `[ERROR] ${errorMessage}`));
-  await clearSessionActiveJobIfMatches(job.sessionId, job.jobId);
-  return job;
+  const confirmedJob = await readJobFile(job.jobId);
+  if (!confirmedJob) {
+    return latestJob;
+  }
+  if (!isStaleJob(confirmedJob)) {
+    return confirmedJob;
+  }
+
+  confirmedJob.status = "failed";
+  confirmedJob.error = errorMessage;
+  confirmedJob.completedAt = nowIso();
+  confirmedJob.heartbeatAt = nowIso();
+  appendEvent(confirmedJob, { type: "error", message: errorMessage });
+  await persistJob(confirmedJob);
+  await appendMessage(confirmedJob.sessionId, createMessage("assistant", `[ERROR] ${errorMessage}`));
+  await clearSessionActiveJobIfMatches(confirmedJob.sessionId, confirmedJob.jobId);
+  return confirmedJob;
 }
 
 async function getNormalizedJob(jobId: string): Promise<AgentJob | null> {
@@ -276,11 +344,21 @@ async function markJobFailed(job: AgentJob, errorMessage: string): Promise<void>
   await appendMessage(job.sessionId, createMessage("assistant", `[ERROR] ${errorMessage}`));
 }
 
-async function refreshJobHeartbeat(jobId: string): Promise<void> {
-  const job = await readJobFile(jobId);
-  if (!job || !isActiveJobStatus(job.status)) {
+async function refreshJobHeartbeat(job: AgentJob): Promise<void> {
+  if (!isActiveJobStatus(job.status) || isJobCancelled(job.jobId)) {
     return;
   }
+
+  const latestJob = await readJobFile(job.jobId);
+  if (!latestJob || !isActiveJobStatus(latestJob.status)) {
+    if (latestJob) {
+      job.status = latestJob.status;
+      job.error = latestJob.error;
+      job.completedAt = latestJob.completedAt;
+    }
+    return;
+  }
+
   job.ownerId = PROCESS_OWNER_ID;
   job.heartbeatAt = nowIso();
   await persistJob(job);
@@ -608,7 +686,7 @@ async function runJob(jobId: string): Promise<void> {
     appendEvent(job, { type: "status", phase: "started" });
     await persistJob(job);
     const heartbeat = setInterval(() => {
-      void refreshJobHeartbeat(job.jobId);
+      void refreshJobHeartbeat(job);
     }, JOB_HEARTBEAT_INTERVAL_MS);
 
     const session = await loadSession(job.sessionId);

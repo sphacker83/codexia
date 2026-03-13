@@ -1,4 +1,5 @@
 import { getSignalAssetDetail, resolveSignalStyle } from "@/src/application/signals/signal-service";
+import { isSignalDataUnavailableError } from "@/src/core/signals/errors";
 
 export const runtime = "nodejs";
 
@@ -22,6 +23,8 @@ export async function GET(
     return Response.json(payload, { status: 200 });
   } catch (error) {
     console.error("Failed to load signal asset detail:", error);
-    return Response.json({ error: "자산 상세를 불러오지 못했습니다." }, { status: 500 });
+    const status = isSignalDataUnavailableError(error) ? error.statusCode : 500;
+    const message = isSignalDataUnavailableError(error) ? error.message : "자산 상세를 불러오지 못했습니다.";
+    return Response.json({ error: message }, { status });
   }
 }

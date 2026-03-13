@@ -1,12 +1,25 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import { SignalDataUnavailableError } from "@/src/core/signals/errors";
 import type { MarketRegime, SignalSnapshot, SignalSourceStatus } from "@/src/core/signals/types";
 
 const SIGNALS_DIRECTORY = path.join(process.cwd(), "data", "signals");
 const LIVE_SNAPSHOT_FILE = path.join(SIGNALS_DIRECTORY, "latest.json");
 const DEMO_SNAPSHOT_FILE = path.join(SIGNALS_DIRECTORY, "demo-snapshot.json");
 const LEGACY_SNAPSHOT_FILE = path.join(SIGNALS_DIRECTORY, "latest-snapshot.json");
+
+function isDemoModeEnabled(): boolean {
+  return process.env.SIGNALS_ENABLE_DEMO_MODE === "1";
+}
+
+function resolveConfiguredDemoSnapshotFile(): string | null {
+  const configuredPath = process.env.SIGNALS_SNAPSHOT_FILE?.trim();
+  if (!configuredPath) {
+    return null;
+  }
+  return path.isAbsolute(configuredPath) ? configuredPath : path.join(process.cwd(), configuredPath);
+}
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error;
@@ -31,13 +44,53 @@ function normalizeMarketRegime(raw: unknown): MarketRegime {
 
 function normalizeSourceStatus(raw: unknown): SignalSourceStatus {
   const normalized = String(raw ?? "").trim().toLowerCase();
-  if (normalized === "healthy" || normalized === "degraded" || normalized === "stale" || normalized === "demo") {
+  if (
+    normalized === "healthy" ||
+    normalized === "degraded" ||
+    normalized === "stale" ||
+    normalized === "demo" ||
+    normalized === "failed"
+  ) {
     return normalized;
   }
   if (normalized === "warning") {
-    return "demo";
+    return "degraded";
+  }
+  if (normalized === "failure" || normalized === "error") {
+    return "failed";
   }
   return "demo";
+}
+
+function getDefaultSourceDetail(status: SignalSourceStatus): string {
+  switch (status) {
+    case "healthy":
+      return "source 상태가 정상 범위입니다.";
+    case "degraded":
+      return "source 일부가 부분 성공 또는 지연 상태입니다.";
+    case "stale":
+      return "latest source 시각이 오래되었습니다.";
+    case "failed":
+      return "required source를 읽지 못했습니다.";
+    case "demo":
+    default:
+      return "로컬 demo fallback source입니다.";
+  }
+}
+
+function ensureDemoSnapshot(snapshot: SignalSnapshot): SignalSnapshot {
+  if (snapshot.snapshotMode === "demo") {
+    return snapshot;
+  }
+
+  return {
+    ...snapshot,
+    snapshotMode: "demo",
+    health: {
+      ...snapshot.health,
+      status: snapshot.health.status === "failed" ? "failed" : "demo",
+    },
+  };
 }
 
 function normalizeCanonicalSnapshot(raw: SignalSnapshot): SignalSnapshot {
@@ -57,7 +110,7 @@ function normalizeCanonicalSnapshot(raw: SignalSnapshot): SignalSnapshot {
             label: source.label,
             status: normalizeSourceStatus(source.status),
             updatedAt: source.updatedAt,
-            detail: source.detail,
+            detail: source.detail || getDefaultSourceDetail(normalizeSourceStatus(source.status)),
           }))
         : [],
     },
@@ -204,6 +257,20 @@ export async function loadSignalSnapshot(): Promise<SignalSnapshot> {
     return liveSnapshot;
   }
 
+  if (!isDemoModeEnabled()) {
+    throw new SignalDataUnavailableError(
+      "live snapshot이 없어 signals를 표시할 수 없습니다. SIGNALS_ENABLE_DEMO_MODE=1 이면 로컬 demo fallback을 허용할 수 있습니다.",
+    );
+  }
+
+  const configuredDemoSnapshot = resolveConfiguredDemoSnapshotFile();
+  if (configuredDemoSnapshot) {
+    const configuredSnapshot = await readSnapshotFile(configuredDemoSnapshot);
+    if (configuredSnapshot) {
+      return ensureDemoSnapshot(configuredSnapshot);
+    }
+  }
+
   const legacySnapshot = await readSnapshotFile(LEGACY_SNAPSHOT_FILE);
   if (legacySnapshot) {
     return legacySnapshot;
@@ -211,10 +278,12 @@ export async function loadSignalSnapshot(): Promise<SignalSnapshot> {
 
   const demoSnapshot = await readSnapshotFile(DEMO_SNAPSHOT_FILE);
   if (!demoSnapshot) {
-    throw new Error("Signal snapshot not found.");
+    throw new SignalDataUnavailableError(
+      "live snapshot이 없고 demo fallback snapshot도 찾지 못했습니다. data/signals 경로와 SIGNALS_SNAPSHOT_FILE 설정을 확인하세요.",
+    );
   }
 
-  return demoSnapshot;
+  return ensureDemoSnapshot(demoSnapshot);
 }
 
 export function getSignalsDirectoryPath(): string {

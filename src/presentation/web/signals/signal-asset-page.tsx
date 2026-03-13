@@ -14,6 +14,22 @@ function formatDateTime(value: string): string {
   }).format(date);
 }
 
+function getModeSummary(payload: SignalAssetResponse): string[] {
+  const summaries: string[] = [];
+
+  if (payload.dataMode === "demo") {
+    summaries.push("DEMO는 로컬 시드 snapshot입니다. 실데이터 파이프라인 전 단계의 참고 화면입니다.");
+  } else {
+    summaries.push("LIVE는 저장된 실데이터 snapshot 기준입니다.");
+  }
+
+  if (payload.stale) {
+    summaries.push("STALE은 snapshot 시각이 오래되어 강한 액션이 자동으로 낮아진 상태입니다.");
+  }
+
+  return summaries;
+}
+
 interface SignalAssetPageProps {
   ticker: string;
   payload: SignalAssetResponse;
@@ -32,9 +48,24 @@ export function SignalAssetPage({ ticker, payload }: SignalAssetPageProps) {
             <div>
               <p className="text-xs font-semibold tracking-[0.18em] text-[var(--theme-muted)]">SIGNAL ASSET DETAIL</p>
               <h1 className="mt-2 text-3xl font-semibold">{ticker.toUpperCase()}</h1>
-              <p className="mt-2 text-sm text-[var(--theme-muted)]">
-                스냅샷 시각 {formatDateTime(payload.generatedAt)} · 스타일 {payload.style} · {payload.dataMode}
+              <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold">
+                <span className="rounded-full border border-[var(--theme-border)] bg-[var(--theme-surface-soft)] px-3 py-1 text-[var(--theme-muted)]">
+                  {payload.dataMode === "demo" ? "DEMO SNAPSHOT" : "LIVE SNAPSHOT"}
+                </span>
+                {payload.stale ? (
+                  <span className="rounded-full border border-red-500/40 bg-red-500/10 px-3 py-1 text-red-200">
+                    STALE SNAPSHOT
+                  </span>
+                ) : null}
+              </div>
+              <p className="mt-3 text-sm text-[var(--theme-muted)]">
+                스냅샷 시각 {formatDateTime(payload.generatedAt)} · 스타일 {payload.style}
               </p>
+              <div className="mt-3 space-y-2 text-sm text-[var(--theme-muted)]">
+                {getModeSummary(payload).map((item) => (
+                  <p key={item}>{item}</p>
+                ))}
+              </div>
             </div>
             <Link
               href={`/signals?style=${payload.style}`}

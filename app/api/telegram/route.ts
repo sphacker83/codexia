@@ -44,7 +44,6 @@ const TELEGRAM_MAX_WAIT_MS = 15 * 60 * 1000;
 const TELEGRAM_DEFAULT_TRACE_MODE = process.env.TELEGRAM_DEFAULT_TRACE_MODE !== "0";
 const TELEGRAM_SCREENSHOT_TEMP_DIR = path.join(process.cwd(), "data", "telegram-screenshots");
 const TELEGRAM_FILE_DOWNLOAD_DIR = path.join(process.cwd(), "data", "telegram-files");
-const TELEGRAM_SCREENSHOT_TIMEOUT_MS = 40_000;
 const TELEGRAM_LOCAL_SCREENSHOT_TIMEOUT_MS = 20_000;
 const TELEGRAM_FILE_BASE_URL = "https://api.telegram.org/file/bot";
 const TELEGRAM_ALLOWED_CHAT_IDS = parseChatIdList(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
@@ -210,7 +209,6 @@ type ParsedTelegramCommand =
   | { kind: "recent"; count: number }
   | { kind: "ping" }
   | { kind: "id" }
-  | { kind: "screenshot"; target: string }
   | { kind: "screenshotLocal"; target?: string }
   | { kind: "eventLog"; count?: number }
   | { kind: "unknown"; message: string };
@@ -623,7 +621,7 @@ function formatReasoningListText(currentReasoning: string): string {
     "사고수준 목록:",
     ...rows,
     `현재 사고수준: ${formatReasoningLabel(currentReasoning)} (${currentReasoning})`,
-    "선택: `/reasoning 2` 또는 `/reasoning high`",
+    "선택: `/effort 2` 또는 `/effort high`",
   ].join("\n");
 }
 
@@ -789,20 +787,40 @@ function formatTelegramDateTime(iso?: string | null): string | null {
 
 function formatSignalBadgeLines(payload: Record<string, unknown>): string[] {
   const lines: string[] = [];
-  const mode = asString(payload.snapshotMode) || asString(payload.mode);
+  const mode = asString(payload.snapshotMode) || asString(payload.dataMode) || asString(payload.mode);
   const demo = asBoolean(payload.demo);
   const stale = asBoolean(payload.stale);
   const generatedAt = asString(payload.generatedAt);
   const generatedLabel = formatTelegramDateTime(generatedAt);
   const disclaimer = asString(payload.disclaimer);
+  const health = asRecord(payload.health);
+  const healthStatus = asString(health?.status);
+  const badges: string[] = [];
 
   if (demo === true || mode === "demo") {
-    lines.push("[demo]");
+    badges.push("[demo]");
   } else if (mode === "live") {
-    lines.push("[live]");
+    badges.push("[live]");
+  }
+  if (healthStatus === "failed") {
+    badges.push("[failed]");
   }
   if (stale === true) {
-    lines.push("[stale]");
+    badges.push("[stale]");
+  }
+  if (badges.length > 0) {
+    lines.push(badges.join(" "));
+  }
+  if (demo === true || mode === "demo") {
+    lines.push("demo는 로컬 demo fallback snapshot입니다.");
+  } else if (mode === "live") {
+    lines.push("live는 저장된 실데이터 snapshot입니다.");
+  }
+  if (healthStatus === "failed") {
+    lines.push("failed는 필요한 live snapshot을 찾지 못해 응답이 제한된 상태입니다.");
+  }
+  if (stale === true) {
+    lines.push("stale은 snapshot 시각이 오래되어 강한 액션을 낮춘 상태입니다.");
   }
   if (generatedLabel) {
     lines.push(`기준: ${generatedLabel}`);
@@ -904,7 +922,7 @@ function formatOverviewTelegramMessage(
         continue;
       }
       const ticker = asString(asset.ticker) || "UNKNOWN";
-      const assetScore = asNumber(asset.compositeScore);
+      const assetScore = asNumber(asset.compositeScore) ?? asNumber(asset.score);
       const verdict = asString(asset.action) || "판정 없음";
       const assetRegime = asString(asset.regime);
       const subtitle = [assetScore !== null ? `${Math.round(assetScore)}점` : null, verdict, assetRegime]
@@ -1021,6 +1039,9 @@ function formatAssetTelegramMessage(
   const drivers = Array.isArray(asset.drivers)
     ? asset.drivers
         .map((item) => {
+          if (typeof item === "string" && item.trim()) {
+            return item.trim();
+          }
           const driver = asRecord(item);
           if (!driver) {
             return null;
@@ -1078,127 +1099,9 @@ function toRecentMessagesText(messages: Message[]): string {
   return preview.join("\n");
 }
 
-function isValidUrl(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      return parsed.toString();
-    }
-  } catch {
-    // ignore and try adding https scheme
-  }
-
-  try {
-    const parsed = new URL(`https://${trimmed}`);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      return parsed.toString();
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
 interface ScreenshotCommandResult {
   exitCode: number | null;
   stderr: string;
-}
-
-function runNodePlaywrightScreenshot(url: string, outputPath: string): Promise<ScreenshotCommandResult> {
-  const script = `
-const timeoutMs = Number(process.env.TELEGRAM_SCREENSHOT_TIMEOUT_MS || "40000");
-
-(async () => {
-  const targetUrl = process.argv[2];
-  const outputPath = process.argv[3];
-  if (!targetUrl || !outputPath) {
-    process.stderr.write("Missing screenshot arguments.");
-    process.exit(1);
-  }
-
-  let chromium;
-  try {
-    ({ chromium } = await import("playwright"));
-  } catch {
-    process.stderr.write("playwright module is not available.");
-    process.exit(2);
-  }
-
-  let browser;
-  try {
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } });
-    await page.goto(targetUrl, { waitUntil: "networkidle", timeout: timeoutMs - 2000 });
-    await page.screenshot({ path: outputPath, fullPage: true, timeout: timeoutMs - 1000 });
-    await browser.close();
-  } catch (error) {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch {
-        // ignore
-      }
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(message);
-    process.exit(3);
-  }
-})();`
-;
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "node",
-      ["-e", script, url, outputPath],
-      {
-        env: {
-          ...process.env,
-          TELEGRAM_SCREENSHOT_TIMEOUT_MS: String(TELEGRAM_SCREENSHOT_TIMEOUT_MS),
-        },
-        stdio: ["ignore", "ignore", "pipe"],
-      },
-    );
-
-    const stderrChunks: Buffer[] = [];
-    let done = false;
-
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrChunks.push(chunk);
-    });
-
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      child.kill("SIGKILL");
-      resolve({
-        exitCode: -1,
-        stderr: `screenshot timed out after ${TELEGRAM_SCREENSHOT_TIMEOUT_MS}ms`,
-      });
-    }, TELEGRAM_SCREENSHOT_TIMEOUT_MS + 2000);
-
-    child.on("error", (error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      reject(error);
-    });
-
-    child.on("close", (code) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve({
-        exitCode: code,
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-      });
-    });
-  });
 }
 
 function runSystemScreenshotCommand(
@@ -1322,22 +1225,6 @@ async function captureLocalScreenshot(label?: string): Promise<string> {
   throw new Error("로컬 화면 캡처 실패");
 }
 
-async function captureWebScreenshot(targetUrl: string): Promise<string> {
-  const safeName = targetUrl.replace(/[^a-zA-Z0-9]+/g, "-").slice(0, 60);
-  const fileName = `tg-screenshot-${Date.now()}-${safeName || "capture"}.png`;
-  const outputPath = path.join(TELEGRAM_SCREENSHOT_TEMP_DIR, fileName);
-
-  await fs.mkdir(TELEGRAM_SCREENSHOT_TEMP_DIR, { recursive: true });
-  const result = await runNodePlaywrightScreenshot(targetUrl, outputPath);
-
-  if (result.exitCode !== 0) {
-    throw new Error(result.stderr || "screenshot command failed");
-  }
-
-  await fs.access(outputPath);
-  return outputPath;
-}
-
 function formatUnauthorizedText(): string {
   if (TELEGRAM_REGISTRATION_CODE) {
     return [
@@ -1400,8 +1287,8 @@ function parseCommand(input: string): ParsedTelegramCommand {
     case "m":
     case "model":
       return { kind: "model", value: arg || undefined };
-    case "reason":
-    case "reasoning":
+    case "e":
+    case "effort":
       return { kind: "reasoning", value: arg || undefined };
     case "jobs":
       if (!arg) {
@@ -1450,16 +1337,6 @@ function parseCommand(input: string): ParsedTelegramCommand {
       return { kind: "ping" };
     case "id":
       return { kind: "id" };
-    case "s":
-    case "screenshot":
-    case "shot":
-      if (!arg) {
-        return {
-          kind: "unknown",
-          message: "`/screenshot <url>` 형식으로 입력해 주세요. (예: /screenshot https://example.com)",
-        };
-      }
-      return { kind: "screenshot", target: arg };
     case "screencap":
     case "sc":
     case "shotme":
@@ -1582,11 +1459,10 @@ function formatHelpText(): string {
     "- /t 또는 /title <제목>: 현재 세션 제목 설정 (예: /title 버그 수정)",
     "- `/m`, `/model`, `/models`: 모델 목록 조회",
     "- `/m <번호|모델명>`, `/model <번호|모델명>`: 기본 모델 변경",
-    "- `/reason` / `/reasoning`: 사고수준 목록 조회",
-    "- `/reasoning <번호|사고수준>`: 사고수준 변경",
+    "- `/e`, `/effort`: 사고수준 목록 조회",
+    "- `/e <번호|사고수준>`, `/effort <번호|사고수준>`: 사고수준 변경",
     "- /session: 현재 세션/목록 조회 (버튼 클릭으로 세션 전환 가능)",
     "- `/recent [개수]`: 최근 대화 미리보기 (기본 6개)",
-    "- /s 또는 /screenshot <url>: 웹 화면 캡처 후 이미지 전송",
     "- /r <번호|세션ID>: 기존 세션으로 전환",
     "- /log [개수]: 최근 이벤트 로그 조회 (기본 40줄)",
     "- /clear: 대화 기록 초기화",
@@ -2458,40 +2334,9 @@ async function handleNewSessionCommand(chatId: number): Promise<void> {
       "새 세션을 시작했습니다.",
       `세션 ID: ${nextSessionId}`,
       "기존 대화 컨텍스트와 분리되어 동작합니다.",
-      "이후 /run, /model, /reasoning, /status 등은 새 세션에서 처리됩니다.",
+      "이후 /run, /model, /effort, /status 등은 새 세션에서 처리됩니다.",
     ].join("\n"),
   );
-}
-
-async function handleScreenshotCommand(chatId: number, rawTarget: string): Promise<void> {
-  const target = isValidUrl(rawTarget);
-  if (!target) {
-    await sendTelegramMessage(chatId, "유효한 URL이 아닙니다. http(s) 주소를 입력해 주세요.");
-    return;
-  }
-
-  const progress = await sendTelegramMessage(
-    chatId,
-    `화면 캡처 시작: ${target}\n잠시만 기다려 주세요...`,
-  );
-
-  let imagePath: string | null = null;
-  try {
-    imagePath = await captureWebScreenshot(target);
-    await sendTelegramPhoto(chatId, imagePath, `스크린샷: ${target}`);
-    await editTelegramMessage(chatId, progress.message_id, `스크린샷 완료: ${target}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "스크린샷 처리에 실패했습니다.";
-    await editTelegramMessage(chatId, progress.message_id, `스크린샷 실패: ${message}`);
-  } finally {
-    if (imagePath) {
-      try {
-        await fs.unlink(imagePath);
-      } catch {
-        // noop
-      }
-    }
-  }
 }
 
 async function handleLocalScreenshotCommand(chatId: number, target?: string): Promise<void> {
@@ -2857,9 +2702,6 @@ export async function POST(request: Request): Promise<Response> {
             return;
           case "id":
             await sendTelegramMessage(message.chat.id, buildUserInfoText(message.chat.id, message.from));
-            return;
-          case "screenshot":
-            await handleScreenshotCommand(message.chat.id, command.target);
             return;
           case "screenshotLocal":
             await handleLocalScreenshotCommand(message.chat.id, command.target);

@@ -22,9 +22,42 @@ function getStatusTone(status: SignalsOverviewResponse["health"]["status"]): str
       return "border-amber-500/40 bg-amber-500/10 text-amber-100";
     case "stale":
       return "border-red-500/40 bg-red-500/10 text-red-200";
+    case "failed":
+      return "border-rose-500/40 bg-rose-500/10 text-rose-100";
     default:
       return "border-sky-500/40 bg-sky-500/10 text-sky-100";
   }
+}
+
+function getStatusLabel(status: SignalsOverviewResponse["health"]["status"]): string {
+  switch (status) {
+    case "healthy":
+      return "정상";
+    case "degraded":
+      return "주의";
+    case "stale":
+      return "지연";
+    case "failed":
+      return "실패";
+    default:
+      return "데모";
+  }
+}
+
+function getModeSummary(payload: SignalsOverviewResponse): string[] {
+  const summaries: string[] = [];
+
+  if (payload.dataMode === "demo") {
+    summaries.push("DEMO는 로컬 시드 snapshot입니다. 실데이터 파이프라인을 대체하지 않습니다.");
+  } else {
+    summaries.push("LIVE는 저장된 실데이터 snapshot 기준입니다.");
+  }
+
+  if (payload.stale) {
+    summaries.push("STALE은 snapshot 시각이 오래되어 강한 액션이 자동으로 낮아진 상태입니다.");
+  }
+
+  return summaries;
 }
 
 interface SignalOverviewPageProps {
@@ -52,11 +85,11 @@ export function SignalOverviewPage({ payload }: SignalOverviewPageProps) {
                   AI SIGNAL DASHBOARD
                 </span>
                 <span className={`rounded-full border px-3 py-1 ${getStatusTone(payload.health.status)}`}>
-                  {payload.dataMode.toUpperCase()}
+                  {payload.dataMode === "demo" ? "DEMO SNAPSHOT" : "LIVE SNAPSHOT"}
                 </span>
                 {payload.stale ? (
                   <span className="rounded-full border border-red-500/40 bg-red-500/10 px-3 py-1 text-red-200">
-                    STALE
+                    STALE SNAPSHOT
                   </span>
                 ) : null}
               </div>
@@ -73,6 +106,12 @@ export function SignalOverviewPage({ payload }: SignalOverviewPageProps) {
                 <span className="rounded-lg border border-[var(--theme-border)] bg-[var(--theme-surface-soft)] px-3 py-2">
                   기준 시각 <strong className="ml-1 text-base">{formatDateTime(payload.generatedAt)}</strong>
                 </span>
+              </div>
+
+              <div className="mt-4 space-y-2 text-sm text-[var(--theme-muted)]">
+                {getModeSummary(payload).map((item) => (
+                  <p key={item}>{item}</p>
+                ))}
               </div>
             </div>
 
@@ -258,12 +297,14 @@ export function SignalOverviewPage({ payload }: SignalOverviewPageProps) {
                 >
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-semibold">{indicator.label}</p>
-                    <p className="text-sm font-semibold text-[var(--theme-muted)]">{indicator.status}</p>
+                    <span className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${getStatusTone(indicator.status)}`}>
+                      {getStatusLabel(indicator.status)}
+                    </span>
                   </div>
                   <p className="mt-2 text-xs text-[var(--theme-muted)]">{indicator.detail}</p>
-                  <p className="mt-2 text-[11px] text-[var(--theme-muted)]">
-                    {formatDateTime(indicator.updatedAt)}
-                  </p>
+                  {indicator.updatedAt ? (
+                    <p className="mt-2 text-[11px] text-[var(--theme-muted)]">{formatDateTime(indicator.updatedAt)}</p>
+                  ) : null}
                 </div>
               ))}
             </div>

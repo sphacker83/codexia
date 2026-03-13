@@ -17,11 +17,18 @@ import {
   type SignalsOverviewResponse,
   type SignalRecommendationsResponse,
 } from "@/src/core/signals/types";
+import { isSignalDataUnavailableError } from "@/src/core/signals/errors";
 import { loadSignalSnapshot } from "@/src/infrastructure/signals/snapshot-store";
 
 const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000;
 const SIGNAL_DISCLAIMER =
   "이 기능은 자동매매가 아닌 판단 보조용입니다. 현재 응답은 snapshot 기준이며, 최종 투자 판단은 사용자 책임입니다.";
+const SIGNAL_DEMO_HEALTH_SUMMARY =
+  "로컬 demo fallback snapshot을 표시 중입니다. live 파이프라인이 준비되면 자동으로 전환됩니다.";
+const SIGNAL_STALE_SUMMARY_SUFFIX = "snapshot 시각이 오래되어 강한 액션이 자동으로 낮아졌습니다.";
+const SIGNAL_DEMO_DISCLAIMER =
+  "현재 응답은 로컬 demo fallback snapshot 기준입니다. 실데이터 파이프라인 전 단계의 참고용 화면입니다.";
+const SIGNAL_STALE_DISCLAIMER_SUFFIX = "현재 snapshot 시각이 오래되어 강한 액션은 자동으로 낮아집니다.";
 
 export function resolveSignalStyle(raw: string | null | undefined): SignalStyle {
   const normalized = raw?.trim().toLowerCase();
@@ -46,15 +53,31 @@ function isSnapshotStale(snapshot: SignalSnapshot): boolean {
   return Date.now() - timestamp > STALE_THRESHOLD_MS;
 }
 
+function appendSentence(base: string, suffix: string): string {
+  if (!base.trim()) {
+    return suffix;
+  }
+  if (base.includes(suffix)) {
+    return base;
+  }
+  return `${base} ${suffix}`;
+}
+
 function toHealthBlock(snapshot: SignalSnapshot): SignalHealthBlockResponse {
   const stale = isSnapshotStale(snapshot);
   const health: SignalHealthSnapshot = snapshot.health;
+  const summary =
+    health.status === "failed"
+      ? health.summary
+      : snapshot.snapshotMode === "demo"
+        ? SIGNAL_DEMO_HEALTH_SUMMARY
+        : stale
+          ? appendSentence(health.summary, SIGNAL_STALE_SUMMARY_SUFFIX)
+          : health.summary;
+
   return {
-    status: stale && snapshot.snapshotMode !== "demo" ? "stale" : health.status,
-    summary:
-      stale && snapshot.snapshotMode !== "demo"
-        ? `${health.summary} snapshot이 오래되어 추천 강도가 자동으로 낮아졌습니다.`
-        : health.summary,
+    status: health.status === "failed" ? "failed" : stale && snapshot.snapshotMode !== "demo" ? "stale" : health.status,
+    summary,
     sources: health.sources,
   };
 }
@@ -113,6 +136,7 @@ function mapOverviewBenchmark(
     ticker: benchmark.ticker,
     name: benchmark.name,
     score: benchmark.score,
+    compositeScore: benchmark.score,
     previousScore: benchmark.previousScore,
     confidence: resolveConfidence(benchmark.score, stale),
     action: benchmark.verdictLabel,
@@ -267,7 +291,14 @@ function buildAssetDetail(
 }
 
 function resolveDisclaimer(snapshot: SignalSnapshot): string {
-  return snapshot.disclaimer || SIGNAL_DISCLAIMER;
+  const base = snapshot.disclaimer || SIGNAL_DISCLAIMER;
+  if (snapshot.snapshotMode === "demo") {
+    return appendSentence(SIGNAL_DEMO_DISCLAIMER, base);
+  }
+  if (isSnapshotStale(snapshot)) {
+    return appendSentence(base, SIGNAL_STALE_DISCLAIMER_SUFFIX);
+  }
+  return base;
 }
 
 export async function getSignalOverview(style: SignalStyle): Promise<SignalsOverviewResponse> {
@@ -280,6 +311,8 @@ export async function getSignalOverview(style: SignalStyle): Promise<SignalsOver
   return {
     style,
     dataMode: snapshot.snapshotMode,
+    snapshotMode: snapshot.snapshotMode,
+    demo: snapshot.snapshotMode === "demo",
     generatedAt: snapshot.generatedAt,
     marketRegime: snapshot.marketRegime,
     marketLabel: snapshot.marketRegime,
@@ -306,6 +339,8 @@ export async function getSignalRecommendations(
   return {
     style,
     dataMode: snapshot.snapshotMode,
+    snapshotMode: snapshot.snapshotMode,
+    demo: snapshot.snapshotMode === "demo",
     generatedAt: snapshot.generatedAt,
     marketRegime: snapshot.marketRegime,
     state: getRecommendationState(snapshot),
@@ -331,6 +366,8 @@ export async function getSignalAsset(
   return {
     style,
     dataMode: snapshot.snapshotMode,
+    snapshotMode: snapshot.snapshotMode,
+    demo: snapshot.snapshotMode === "demo",
     generatedAt: snapshot.generatedAt,
     stale: isSnapshotStale(snapshot),
     asset: buildAssetDetail(snapshot, style, benchmark, candidate),
@@ -352,6 +389,8 @@ export async function getSignalBriefing(style: SignalStyle): Promise<SignalBrief
   return {
     style,
     dataMode: overview.dataMode,
+    snapshotMode: overview.snapshotMode,
+    demo: overview.demo,
     generatedAt: overview.generatedAt,
     stale: overview.stale,
     text: [
@@ -374,12 +413,21 @@ export async function getSignalBriefing(style: SignalStyle): Promise<SignalBrief
 }
 
 export async function getSignalHealth(): Promise<SignalHealthResponse> {
-  const snapshot = await loadSignalSnapshot();
-  return {
-    dataMode: snapshot.snapshotMode,
-    generatedAt: snapshot.generatedAt,
-    stale: isSnapshotStale(snapshot),
-    health: toHealthBlock(snapshot),
-    disclaimer: resolveDisclaimer(snapshot),
-  };
+  try {
+    const snapshot = await loadSignalSnapshot();
+    return {
+      dataMode: snapshot.snapshotMode,
+      snapshotMode: snapshot.snapshotMode,
+      demo: snapshot.snapshotMode === "demo",
+      generatedAt: snapshot.generatedAt,
+      stale: isSnapshotStale(snapshot),
+      health: toHealthBlock(snapshot),
+      disclaimer: resolveDisclaimer(snapshot),
+    };
+  } catch (error) {
+    if (isSignalDataUnavailableError(error)) {
+      return error.toHealthResponse();
+    }
+    throw error;
+  }
 }

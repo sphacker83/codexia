@@ -3,11 +3,11 @@
 ## Phase 0. Re-baseline Current Shell
 
 - [x] Architecture/Data/Signal/API/Ops spec 문서 추가
-- [ ] `signals` 기능을 demo fallback으로 재정의
-- [ ] `SIGNALS_ENABLE_DEMO_MODE` 환경변수 추가
-- [ ] production mode에서 DB snapshot이 없을 때 fail-closed health 응답 구현
-- [ ] UI/Telegram에 demo/live/stale 의미를 더 명확히 표기
-- [ ] 현재 `dev/active/ai-signal-dashboard/*` 문서를 이번 계획 기준으로 유지
+- [x] `signals` 기능을 demo fallback으로 재정의
+- [x] `SIGNALS_ENABLE_DEMO_MODE` 환경변수 추가
+- [x] production mode에서 DB snapshot이 없을 때 fail-closed health 응답 구현
+- [x] UI/Telegram에 demo/live/stale 의미를 더 명확히 표기
+- [x] 현재 `dev/active/ai-signal-dashboard/*` 문서를 이번 계획 기준으로 유지
 
 ## Phase 1. Storage Spine
 
