@@ -61,6 +61,10 @@ const TELEGRAM_COMPLETION_CURSOR_FILE = path.resolve(
   process.cwd(),
   process.env.TELEGRAM_COMPLETION_CURSOR_FILE?.trim() || "data/telegram-completion-cursors.json",
 );
+const TELEGRAM_SIGNAL_STYLE_FILE = path.resolve(
+  process.cwd(),
+  process.env.TELEGRAM_SIGNAL_STYLE_FILE?.trim() || "data/signals/telegram-style-preferences.json",
+);
 const TELEGRAM_EVENT_LOG_FILE = path.resolve(
   process.cwd(),
   process.env.TELEGRAM_EVENT_LOG_FILE?.trim() || "data/telegram-events.log",
@@ -83,10 +87,21 @@ const TELEGRAM_REASONING_LABELS: Record<string, string> = {
   high: "높음",
   xhigh: "최고",
 };
+const SIGNAL_STYLE_LABELS = {
+  conservative: "보수적",
+  balanced: "균형형",
+  aggressive: "공격형",
+} as const;
+const SIGNAL_DEFAULT_STYLE = "conservative";
+const SIGNAL_RECOMMENDATION_DEFAULT_LIMIT = 5;
+const SIGNAL_RECOMMENDATION_MAX_LIMIT = 10;
+const SIGNAL_DISCLOSURE_TEXT = "판단 보조용이며 자동매매/투자자문이 아닙니다.";
 
 type TelegramCommandStart =
   | { kind: "start"; code?: string }
   | { kind: "unknown"; message: string };
+
+type SignalRecommendationStyle = keyof typeof SIGNAL_STYLE_LABELS;
 
 interface TelegramUser {
   id: number;
@@ -177,6 +192,11 @@ type ParsedTelegramCommand =
   | { kind: "run"; message: string }
   | { kind: "help" }
   | TelegramCommandStart
+  | { kind: "signal" }
+  | { kind: "briefing" }
+  | { kind: "recommend"; count: number }
+  | { kind: "asset"; ticker: string }
+  | { kind: "signalStyle"; value?: string }
   | { kind: "newSession" }
   | { kind: "resumeSession"; selector: string }
   | { kind: "status" }
@@ -206,6 +226,9 @@ let chatSessionOverridesLoadPromise: Promise<void> | null = null;
 const chatCompletionCursors = new Map<number, string>();
 let chatCompletionCursorsLoaded = false;
 let chatCompletionCursorsLoadPromise: Promise<void> | null = null;
+const chatSignalStyles = new Map<number, SignalRecommendationStyle>();
+let chatSignalStylesLoaded = false;
+let chatSignalStylesLoadPromise: Promise<void> | null = null;
 
 function getTelegramBotToken(): string {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
@@ -341,6 +364,42 @@ async function ensureChatCompletionCursorsLoaded(): Promise<void> {
   await chatCompletionCursorsLoadPromise;
 }
 
+async function ensureChatSignalStylesLoaded(): Promise<void> {
+  if (chatSignalStylesLoaded) {
+    return;
+  }
+
+  if (chatSignalStylesLoadPromise) {
+    await chatSignalStylesLoadPromise;
+    return;
+  }
+
+  chatSignalStylesLoadPromise = (async () => {
+    try {
+      const raw = await fs.readFile(TELEGRAM_SIGNAL_STYLE_FILE, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (parsed && typeof parsed === "object") {
+        for (const [rawChatId, rawStyle] of Object.entries(parsed)) {
+          const chatId = Number(rawChatId);
+          const style = resolveSignalStyleByInput(typeof rawStyle === "string" ? rawStyle : "");
+          if (!Number.isInteger(chatId) || !style) {
+            continue;
+          }
+          chatSignalStyles.set(chatId, style);
+        }
+      }
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error("Failed to load telegram signal styles.", error);
+      }
+    } finally {
+      chatSignalStylesLoaded = true;
+    }
+  })();
+
+  await chatSignalStylesLoadPromise;
+}
+
 function safeJsonSerialize(value: unknown): string {
   try {
     return JSON.stringify(value);
@@ -396,6 +455,15 @@ async function persistChatCompletionCursors(): Promise<void> {
   await fs.writeFile(TELEGRAM_COMPLETION_CURSOR_FILE, JSON.stringify(payload, null, 2), "utf8");
 }
 
+async function persistChatSignalStyles(): Promise<void> {
+  await fs.mkdir(path.dirname(TELEGRAM_SIGNAL_STYLE_FILE), { recursive: true });
+  const payload: Record<string, SignalRecommendationStyle> = {};
+  for (const [chatId, style] of chatSignalStyles.entries()) {
+    payload[String(chatId)] = style;
+  }
+  await fs.writeFile(TELEGRAM_SIGNAL_STYLE_FILE, JSON.stringify(payload, null, 2), "utf8");
+}
+
 async function setChatCompletionCursor(chatId: number, completedAt: string): Promise<void> {
   await ensureChatCompletionCursorsLoaded();
   chatCompletionCursors.set(chatId, completedAt);
@@ -406,6 +474,17 @@ async function setSessionOverride(chatId: number, sessionId: string): Promise<vo
   await ensureChatSessionOverridesLoaded();
   chatSessionOverrides.set(chatId, sessionId);
   await persistChatSessionOverrides();
+}
+
+async function setChatSignalStyle(chatId: number, style: SignalRecommendationStyle): Promise<void> {
+  await ensureChatSignalStylesLoaded();
+  chatSignalStyles.set(chatId, style);
+  await persistChatSignalStyles();
+}
+
+async function getChatSignalStyle(chatId: number): Promise<SignalRecommendationStyle> {
+  await ensureChatSignalStylesLoaded();
+  return chatSignalStyles.get(chatId) ?? SIGNAL_DEFAULT_STYLE;
 }
 
 async function getSessionIdForChat(chatId: number): Promise<string> {
@@ -640,6 +719,350 @@ function resolveReasoningByInput(raw: string): string | null {
   }
 
   return null;
+}
+
+function resolveSignalStyleByInput(raw: string): SignalRecommendationStyle | null {
+  const trimmed = raw.trim().toLowerCase();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed === "conservative" || trimmed === "보수적") {
+    return "conservative";
+  }
+  if (trimmed === "balanced" || trimmed === "균형" || trimmed === "균형형") {
+    return "balanced";
+  }
+  if (trimmed === "aggressive" || trimmed === "공격적" || trimmed === "공격형") {
+    return "aggressive";
+  }
+  return null;
+}
+
+function getSignalStyleLabel(style: SignalRecommendationStyle): string {
+  return SIGNAL_STYLE_LABELS[style];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+}
+
+function formatTelegramDateTime(iso?: string | null): string | null {
+  if (!iso) {
+    return null;
+  }
+  const target = new Date(iso);
+  if (Number.isNaN(target.getTime())) {
+    return null;
+  }
+
+  const month = String(target.getMonth() + 1).padStart(2, "0");
+  const day = String(target.getDate()).padStart(2, "0");
+  const hours = String(target.getHours()).padStart(2, "0");
+  const minutes = String(target.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}`;
+}
+
+function formatSignalBadgeLines(payload: Record<string, unknown>): string[] {
+  const lines: string[] = [];
+  const mode = asString(payload.snapshotMode) || asString(payload.mode);
+  const demo = asBoolean(payload.demo);
+  const stale = asBoolean(payload.stale);
+  const generatedAt = asString(payload.generatedAt);
+  const generatedLabel = formatTelegramDateTime(generatedAt);
+  const disclaimer = asString(payload.disclaimer);
+
+  if (demo === true || mode === "demo") {
+    lines.push("[demo]");
+  } else if (mode === "live") {
+    lines.push("[live]");
+  }
+  if (stale === true) {
+    lines.push("[stale]");
+  }
+  if (generatedLabel) {
+    lines.push(`기준: ${generatedLabel}`);
+  }
+  if (disclaimer) {
+    lines.push(disclaimer);
+  }
+
+  return lines;
+}
+
+function formatSignalFooter(): string {
+  return SIGNAL_DISCLOSURE_TEXT;
+}
+
+function formatStyleSummary(style: SignalRecommendationStyle): string {
+  return `스타일: ${getSignalStyleLabel(style)} (${style})`;
+}
+
+function resolveRequestOrigin(request: Request): string {
+  try {
+    return new URL(request.url).origin;
+  } catch {
+    const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
+    if (!host) {
+      throw new Error("request origin을 확인할 수 없습니다.");
+    }
+    const protocol = request.headers.get("x-forwarded-proto") || "https";
+    return `${protocol}://${host}`;
+  }
+}
+
+async function callInternalSignalApi(
+  origin: string,
+  pathname: string,
+  searchParams?: Record<string, string | number | undefined>,
+): Promise<Record<string, unknown>> {
+  const url = new URL(pathname, origin);
+  if (searchParams) {
+    for (const [key, value] of Object.entries(searchParams)) {
+      if (value === undefined) {
+        continue;
+      }
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      accept: "application/json",
+      "x-internal-telegram": "1",
+    },
+    cache: "no-store",
+  });
+  const payload = (await response.json().catch(() => null)) as unknown;
+  if (!response.ok) {
+    const record = asRecord(payload);
+    const message = asString(record?.error) || `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  const record = asRecord(payload);
+  if (!record) {
+    throw new Error("시그널 응답이 JSON 객체가 아닙니다.");
+  }
+  return record;
+}
+
+function formatOverviewTelegramMessage(
+  payload: Record<string, unknown>,
+  style: SignalRecommendationStyle,
+): string {
+  const assets = Array.isArray(payload.benchmarks) ? payload.benchmarks : [];
+  const health = asRecord(payload.health);
+  const summary = asString(payload.summary);
+  const marketLabel = asString(payload.marketLabel);
+  const marketRegime = asString(payload.marketRegime);
+  const lines = [
+    "시그널 요약",
+    formatStyleSummary(style),
+    ...formatSignalBadgeLines(payload),
+  ];
+
+  if (marketLabel || marketRegime) {
+    lines.push(
+      [marketLabel, marketRegime].filter(Boolean).join(" · "),
+    );
+  }
+  if (summary) {
+    lines.push(summary);
+  }
+
+  if (assets.length === 0) {
+    lines.push("벤치마크 시그널 데이터가 아직 없습니다.");
+  } else {
+    for (const item of assets.slice(0, 4)) {
+      const asset = asRecord(item);
+      if (!asset) {
+        continue;
+      }
+      const ticker = asString(asset.ticker) || "UNKNOWN";
+      const assetScore = asNumber(asset.compositeScore);
+      const verdict = asString(asset.action) || "판정 없음";
+      const assetRegime = asString(asset.regime);
+      const subtitle = [assetScore !== null ? `${Math.round(assetScore)}점` : null, verdict, assetRegime]
+        .filter(Boolean)
+        .join(" · ");
+      lines.push(`${ticker}: ${subtitle}`);
+    }
+  }
+
+  if (health) {
+    const healthSummary = asString(health.summary);
+    if (healthSummary) {
+      lines.push(`상태: ${healthSummary}`);
+    }
+  }
+
+  lines.push(formatSignalFooter());
+  return lines.join("\n");
+}
+
+function formatBriefingTelegramMessage(
+  payload: Record<string, unknown>,
+  fallbackStyle: SignalRecommendationStyle,
+): string {
+  const style = resolveSignalStyleByInput(asString(payload.style) || "") || fallbackStyle;
+  const text = asString(payload.text);
+  const bullets = asStringArray(payload.bullets);
+  const lines = [
+    "브리핑",
+    formatStyleSummary(style),
+    ...formatSignalBadgeLines(payload),
+  ];
+
+  if (text) {
+    lines.push(text);
+  }
+  for (const bullet of bullets.slice(0, 6)) {
+    lines.push(`- ${bullet}`);
+  }
+  if (!text && bullets.length === 0) {
+    lines.push("브리핑 텍스트가 아직 없습니다.");
+  }
+
+  lines.push(formatSignalFooter());
+  return lines.join("\n");
+}
+
+function formatRecommendationsTelegramMessage(
+  payload: Record<string, unknown>,
+  fallbackStyle: SignalRecommendationStyle,
+): string {
+  const style = resolveSignalStyleByInput(asString(payload.style) || "") || fallbackStyle;
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const marketRegime = asString(payload.marketRegime);
+  const state = asString(payload.state);
+  const lines = [
+    "추천 종목",
+    formatStyleSummary(style),
+    ...formatSignalBadgeLines(payload),
+  ];
+
+  if (marketRegime) {
+    lines.push(`시장 레짐: ${marketRegime}`);
+  }
+  if (state) {
+    lines.push(`추천 상태: ${state}`);
+  }
+
+  if (items.length === 0) {
+    lines.push("현재 조건에 맞는 후보가 없습니다.");
+  } else {
+    for (const item of items) {
+      const candidate = asRecord(item);
+      if (!candidate) {
+        continue;
+      }
+      const ticker = asString(candidate.ticker) || "UNKNOWN";
+      const name = asString(candidate.name);
+      const score = asNumber(candidate.styleScore);
+      const verdict = asString(candidate.verdictLabel) || "판정 없음";
+      const thesis = asString(candidate.thesis);
+      const riskFlags = asStringArray(candidate.riskFlags);
+      lines.push(
+        `${ticker}${name ? ` (${name})` : ""}: ${score !== null ? `${Math.round(score)}점` : "점수 없음"} · ${verdict}`,
+      );
+      if (thesis) {
+        lines.push(`  근거: ${thesis}`);
+      }
+      if (riskFlags.length > 0) {
+        lines.push(`  리스크: ${riskFlags.slice(0, 3).join(", ")}`);
+      }
+    }
+  }
+
+  lines.push(formatSignalFooter());
+  return lines.join("\n");
+}
+
+function formatAssetTelegramMessage(
+  payload: Record<string, unknown>,
+  fallbackStyle: SignalRecommendationStyle,
+): string {
+  const style = resolveSignalStyleByInput(asString(payload.style) || "") || fallbackStyle;
+  const asset = asRecord(payload.asset);
+
+  if (!asset) {
+    return ["종목 상세", "종목 데이터를 찾지 못했습니다.", formatSignalFooter()].join("\n");
+  }
+
+  const ticker = asString(asset.ticker) || "UNKNOWN";
+  const name = asString(asset.name);
+  const summary = asString(asset.summary);
+  const verdict = asString(asset.verdictLabel);
+  const drivers = Array.isArray(asset.drivers)
+    ? asset.drivers
+        .map((item) => {
+          const driver = asRecord(item);
+          if (!driver) {
+            return null;
+          }
+          return asString(driver.label) || asString(driver.summary);
+        })
+        .filter((item): item is string => Boolean(item))
+    : [];
+  const riskFlags = asStringArray(asset.riskFlags);
+  const factorScores = asRecord(asset.factorScores);
+  const lines = [
+    `${ticker}${name ? ` · ${name}` : ""}`,
+    formatStyleSummary(style),
+    ...formatSignalBadgeLines(payload),
+  ];
+
+  if (verdict) {
+    lines.push(`판정: ${verdict}`);
+  }
+  if (summary) {
+    lines.push(summary);
+  }
+  if (drivers.length > 0) {
+    lines.push(`상승 요인: ${drivers.slice(0, 4).join(", ")}`);
+  }
+  if (riskFlags.length > 0) {
+    lines.push(`리스크: ${riskFlags.slice(0, 4).join(", ")}`);
+  }
+  if (factorScores) {
+    const factorParts = Object.entries(factorScores)
+      .map(([key, value]) => {
+        const score = asNumber(value);
+        return score === null ? null : `${key}:${Math.round(score)}`;
+      })
+      .filter((item): item is string => Boolean(item));
+    if (factorParts.length > 0) {
+      lines.push(`팩터: ${factorParts.join(" / ")}`);
+    }
+  }
+
+  lines.push(formatSignalFooter());
+  return lines.join("\n");
 }
 
 function toRecentMessagesText(messages: Message[]): string {
@@ -942,6 +1365,37 @@ function parseCommand(input: string): ParsedTelegramCommand {
   switch (command) {
     case "run":
       return { kind: "run", message: arg };
+    case "signal":
+      return { kind: "signal" };
+    case "briefing":
+    case "brief":
+      return { kind: "briefing" };
+    case "recommend":
+    case "reco":
+      if (!arg) {
+        return { kind: "recommend", count: SIGNAL_RECOMMENDATION_DEFAULT_LIMIT };
+      }
+      const parsedRecommendCount = Number.parseInt(arg, 10);
+      if (Number.isInteger(parsedRecommendCount) && parsedRecommendCount > 0) {
+        return {
+          kind: "recommend",
+          count: Math.min(SIGNAL_RECOMMENDATION_MAX_LIMIT, parsedRecommendCount),
+        };
+      }
+      return {
+        kind: "unknown",
+        message: `\`/recommend <1~${SIGNAL_RECOMMENDATION_MAX_LIMIT}>\` 형식으로 입력해 주세요. (예: /recommend 5)`,
+      };
+    case "asset":
+      if (!arg) {
+        return {
+          kind: "unknown",
+          message: "`/asset <티커>` 형식으로 입력해 주세요. (예: /asset MSFT)",
+        };
+      }
+      return { kind: "asset", ticker: arg.toUpperCase() };
+    case "style":
+      return { kind: "signalStyle", value: arg || undefined };
     case "models":
     case "m":
     case "model":
@@ -1113,6 +1567,11 @@ function buildSessionResumeReplyKeyboard(
 function formatHelpText(): string {
   const base = [
     "명령어 안내:",
+    "- /signal: 현재 SPY/QQQ 시그널 요약",
+    "- /briefing: 시장 브리핑과 핵심 bullet",
+    `- /recommend [개수]: 스타일 기준 추천 종목 조회 (기본 ${SIGNAL_RECOMMENDATION_DEFAULT_LIMIT}개)`,
+    "- /asset <티커>: 개별 종목 상세 요약",
+    "- `/style [conservative|balanced|aggressive]`: 추천 스타일 조회/변경",
     "- /run <요청>: Codex에 바로 전달합니다.",
     "- `/run` 없이 텍스트만 보내도 실행됩니다.",
     "- /status: 현재 세션 상태 확인",
@@ -1388,6 +1847,89 @@ async function waitForJobAndSendResult(chatId: number, jobId: string, progressMe
   await sendTelegramMessage(
     chatId,
     `요청 처리 시간이 초과되었습니다. 잠시 후 /status 로 확인하거나 다시 요청해 주세요.`,
+  );
+}
+
+async function handleSignalCommand(chatId: number, origin: string): Promise<void> {
+  const style = await getChatSignalStyle(chatId);
+  const payload = await callInternalSignalApi(origin, "/api/signals/overview", { style });
+  await sendTelegramMessage(chatId, formatOverviewTelegramMessage(payload, style));
+}
+
+async function handleBriefingCommand(chatId: number, origin: string): Promise<void> {
+  const style = await getChatSignalStyle(chatId);
+  const payload = await callInternalSignalApi(origin, "/api/signals/briefing", { style });
+  await sendTelegramMessage(chatId, formatBriefingTelegramMessage(payload, style));
+}
+
+async function handleRecommendCommand(
+  chatId: number,
+  origin: string,
+  count: number,
+): Promise<void> {
+  const style = await getChatSignalStyle(chatId);
+  const payload = await callInternalSignalApi(origin, "/api/signals/recommendations", {
+    style,
+    limit: count,
+  });
+  await sendTelegramMessage(chatId, formatRecommendationsTelegramMessage(payload, style));
+}
+
+async function handleAssetCommand(
+  chatId: number,
+  origin: string,
+  ticker: string,
+): Promise<void> {
+  const style = await getChatSignalStyle(chatId);
+  const payload = await callInternalSignalApi(
+    origin,
+    `/api/signals/assets/${encodeURIComponent(ticker)}`,
+    { style },
+  );
+  await sendTelegramMessage(chatId, formatAssetTelegramMessage(payload, style));
+}
+
+async function handleSignalStyleCommand(
+  chatId: number,
+  value: string | undefined,
+): Promise<void> {
+  const currentStyle = await getChatSignalStyle(chatId);
+  if (!value) {
+    await sendTelegramMessage(
+      chatId,
+      [
+        "추천 스타일 설정",
+        `현재: ${getSignalStyleLabel(currentStyle)} (${currentStyle})`,
+        "변경: /style conservative | /style balanced | /style aggressive",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  const nextStyle = resolveSignalStyleByInput(value);
+  if (!nextStyle) {
+    await sendTelegramMessage(
+      chatId,
+      [
+        `스타일을 해석하지 못했습니다: ${value}`,
+        "지원값: conservative | balanced | aggressive",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  if (nextStyle === currentStyle) {
+    await sendTelegramMessage(
+      chatId,
+      `현재 추천 스타일이 이미 ${getSignalStyleLabel(nextStyle)} (${nextStyle})입니다.`,
+    );
+    return;
+  }
+
+  await setChatSignalStyle(chatId, nextStyle);
+  await sendTelegramMessage(
+    chatId,
+    `추천 스타일을 ${getSignalStyleLabel(nextStyle)} (${nextStyle})로 변경했습니다.`,
   );
 }
 
@@ -2026,6 +2568,7 @@ async function handleStartCommand(chatId: number, code?: string): Promise<void> 
 
 export async function POST(request: Request): Promise<Response> {
   try {
+    const requestOrigin = resolveRequestOrigin(request);
     const webhookSecret = getWebhookSecret();
     if (webhookSecret) {
       const header = request.headers.get("x-telegram-bot-api-secret-token");
@@ -2210,7 +2753,22 @@ export async function POST(request: Request): Promise<Response> {
 
     void (async () => {
       try {
-    switch (command.kind) {
+        switch (command.kind) {
+          case "signal":
+            await handleSignalCommand(message.chat.id, requestOrigin);
+            return;
+          case "briefing":
+            await handleBriefingCommand(message.chat.id, requestOrigin);
+            return;
+          case "recommend":
+            await handleRecommendCommand(message.chat.id, requestOrigin, command.count);
+            return;
+          case "asset":
+            await handleAssetCommand(message.chat.id, requestOrigin, command.ticker);
+            return;
+          case "signalStyle":
+            await handleSignalStyleCommand(message.chat.id, command.value);
+            return;
           case "help":
           case "start":
             if (command.kind === "start") {

@@ -33,6 +33,11 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env.local
 data*
+!data/
+data/*
+!data/signals/
+data/signals/*
+!data/signals/demo-snapshot.json
 
 # vercel
 .vercel
