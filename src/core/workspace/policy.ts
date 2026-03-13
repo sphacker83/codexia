@@ -11,28 +11,6 @@ const DEFAULT_TELEGRAM_RESPONSE_STYLE_FILE = path.resolve(
   "config/telegram-response-style.txt",
 );
 
-const DEFAULT_TELEGRAM_RESPONSE_STYLE_PROMPT = [
-  "텔레그램 응답 형식 규칙:",
-  "- 사용자의 의도와 메시지 성격을 먼저 추정하고, 그에 맞는 이모지 1개와 짧은 제목 1줄로 시작하세요.",
-  "- 기본적으로는 필요 이상으로 길게 쓰지 말고 핵심부터 간결하게 답하세요.",
-  "- 1~3문장으로 충분히 끝나는 내용이면 짧게 마무리하고, 긴 설명이 필요할 때만 아래 6개 섹션을 사용합니다.",
-  "- 섹션은 다음 6개 참고합니다.",
-  "  - 🎯 핵심",
-  "  - 🔍 상황",
-  "  - 🛠️ 액션",
-  "  - ⚠️ 리스크",
-  "  - ✨ 제안",
-  "  - ⏩ 다음 단계",
-  "- 각 섹션 제목은 `이모지 + 제목` 한 줄 형태로 쓰고 `**...**` 같은 markdown 굵게 강조는 사용하지 마세요.",
-  "- 결론과 실행 포인트를 먼저 쓰고, 배경 설명은 뒤로 보냅니다.",
-  "- 단락은 짧게, bullet은 1단계만 사용하세요.",
-  "- 이모지는 섹션 제목에서만 과하지 않게 제한하세요.",
-  "- 표, 중첩 bullet, 과한 서론은 피하세요.",
-  "- 링크가 꼭 필요하면 마지막에만 모아 적으세요.",
-  "- 사용자가 별도 형식이나 길이를 지정하면 그 지시를 우선하세요.",
-  "- 단순 성공/실패/확인 응답은 1~3줄로 짧게 답해도 됩니다.",
-].join("\n");
-
 export type AgentPromptChannel = "web" | "telegram";
 
 interface AgentSystemPromptOptions {
@@ -192,7 +170,7 @@ function readTelegramResponseStyleInstructionPrompt(): string | undefined {
   return readTextFileIfExists(configuredPath);
 }
 
-function getTelegramResponseStylePrompt(): string {
+function getTelegramResponseStylePrompt(): string | undefined {
   const inlinePrompt = process.env[AGENT_TELEGRAM_RESPONSE_STYLE_PROMPT_ENV]?.trim();
   if (inlinePrompt) {
     return inlinePrompt;
@@ -204,7 +182,7 @@ function getTelegramResponseStylePrompt(): string {
     return instructionPrompt;
   }
 
-  return DEFAULT_TELEGRAM_RESPONSE_STYLE_PROMPT;
+  return undefined;
 }
 
 export function getAgentSystemPrompt(
@@ -238,7 +216,10 @@ export function getAgentSystemPrompt(
   }
 
   if (options.channel === "telegram" && isTelegramResponseStyleEnabled()) {
-    sections.push(getTelegramResponseStylePrompt());
+    const telegramResponseStylePrompt = getTelegramResponseStylePrompt();
+    if (telegramResponseStylePrompt) {
+      sections.push(telegramResponseStylePrompt);
+    }
   }
 
   return sections.join("\n\n");

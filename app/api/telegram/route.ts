@@ -43,8 +43,10 @@ const TELEGRAM_POLL_INTERVAL_MS = 1000;
 const TELEGRAM_MAX_WAIT_MS = 15 * 60 * 1000;
 const TELEGRAM_DEFAULT_TRACE_MODE = process.env.TELEGRAM_DEFAULT_TRACE_MODE !== "0";
 const TELEGRAM_SCREENSHOT_TEMP_DIR = path.join(process.cwd(), "data", "telegram-screenshots");
+const TELEGRAM_FILE_DOWNLOAD_DIR = path.join(process.cwd(), "data", "telegram-files");
 const TELEGRAM_SCREENSHOT_TIMEOUT_MS = 40_000;
 const TELEGRAM_LOCAL_SCREENSHOT_TIMEOUT_MS = 20_000;
+const TELEGRAM_FILE_BASE_URL = "https://api.telegram.org/file/bot";
 const TELEGRAM_ALLOWED_CHAT_IDS = parseChatIdList(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
 const TELEGRAM_REGISTRATION_CODE = process.env.TELEGRAM_REGISTRATION_CODE?.trim() || null;
 const TELEGRAM_AUTHORIZED_CHATS_FILE = path.resolve(
@@ -99,8 +101,40 @@ interface TelegramChat {
 interface TelegramMessage {
   message_id: number;
   text?: string;
+  caption?: string;
   chat: TelegramChat;
   from?: TelegramUser;
+  document?: TelegramDocument;
+  photo?: TelegramPhotoSize[];
+}
+
+interface TelegramDocument {
+  file_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+interface TelegramFile {
+  file_id: string;
+  file_unique_id: string;
+  file_path: string;
+  file_size?: number;
+}
+
+interface TelegramIncomingAttachment {
+  fileId: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
 }
 
 interface TelegramCallbackQuery {
@@ -188,6 +222,44 @@ function getWebhookSecret(): string | null {
 function toSessionId(chatId: number): string {
   const raw = String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_");
   return `tg_${raw}`;
+}
+
+function sanitizeTelegramFileName(fileName?: string): string {
+  const raw = fileName?.trim();
+  if (!raw) {
+    return "attachment";
+  }
+  const base = path.basename(raw);
+  const safeBase = base.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_").trim();
+  if (!safeBase) {
+    return "attachment";
+  }
+  return safeBase.slice(0, 120);
+}
+
+function getIncomingAttachment(message: TelegramMessage): TelegramIncomingAttachment | null {
+  if (message.document?.file_id) {
+    return {
+      fileId: message.document.file_id,
+      fileName: message.document.file_name,
+      mimeType: message.document.mime_type,
+      fileSize: message.document.file_size,
+    };
+  }
+
+  if (message.photo && message.photo.length > 0) {
+    const selected = [...message.photo].sort((left, right) =>
+      (right.file_size ?? 0) - (left.file_size ?? 0),
+    )[0];
+    return {
+      fileId: selected.file_id,
+      fileName: `photo-${selected.file_unique_id}.jpg`,
+      mimeType: "image/jpeg",
+      fileSize: selected.file_size,
+    };
+  }
+
+  return null;
 }
 
 function isSessionOwnedByChat(chatId: number, sessionId: string): boolean {
@@ -1123,6 +1195,42 @@ async function callTelegramApi<T>(method: string, payload: Record<string, unknow
   return parsed.result;
 }
 
+async function downloadTelegramFile(
+  attachment: TelegramIncomingAttachment,
+): Promise<{ savedPath: string; fileName: string }> {
+  const token = getTelegramBotToken();
+  const file = await callTelegramApi<TelegramFile>("getFile", { file_id: attachment.fileId });
+  if (!file?.file_path) {
+    throw new Error("Telegram file_path를 조회하지 못했습니다.");
+  }
+
+  const response = await fetch(`${TELEGRAM_FILE_BASE_URL}${token}/${file.file_path}`);
+  if (!response.ok) {
+    throw new Error(`파일 다운로드 실패: HTTP ${response.status}`);
+  }
+
+  const downloaded = Buffer.from(await response.arrayBuffer());
+  const safeName = sanitizeTelegramFileName(attachment.fileName || path.basename(file.file_path));
+  const uniqueName = `${Date.now()}-${randomUUID().replaceAll("-", "").slice(0, 12)}-${safeName}`;
+  const savedPath = path.join(TELEGRAM_FILE_DOWNLOAD_DIR, uniqueName);
+
+  await fs.mkdir(TELEGRAM_FILE_DOWNLOAD_DIR, { recursive: true });
+  await fs.writeFile(savedPath, downloaded);
+
+  return { savedPath, fileName: safeName };
+}
+
+function appendAttachmentContextToRunMessage(message: string, attachmentPath: string | null): string {
+  const trimmed = message.trim();
+  if (!attachmentPath) {
+    return trimmed;
+  }
+  if (!trimmed) {
+    return `첨부 파일을 분석해줘.\n첨부 파일 경로: ${attachmentPath}`;
+  }
+  return `${trimmed}\n\n첨부 파일 경로: ${attachmentPath}`;
+}
+
 async function sendTelegramMessage(chatId: number, text: string): Promise<TelegramSentMessage> {
   const chunks = splitTelegramText(text, TELEGRAM_CHAT_TEXT_LIMIT - 64);
   let sentMessageId: number | null = null;
@@ -2033,16 +2141,62 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const message = body.message ?? body.edited_message;
-    if (!message || typeof message.text !== "string") {
+    if (!message) {
+      return Response.json({ ok: true }, { status: 200 });
+    }
+
+    const attachment = getIncomingAttachment(message);
+    let downloadedAttachmentPath: string | null = null;
+
+    if (attachment) {
+      try {
+        const downloaded = await downloadTelegramFile(attachment);
+        downloadedAttachmentPath = downloaded.savedPath;
+        await appendTelegramEventLog("message.attachment_downloaded", {
+          chatId: message.chat.id,
+          fileName: downloaded.fileName,
+          fileSize: attachment.fileSize,
+          filePath: downloaded.savedPath,
+          updateType: body.edited_message ? "edited_message" : "message",
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "첨부 파일을 받지 못했습니다.";
+        await appendTelegramEventLog("message.attachment_download_failed", {
+          chatId: message.chat.id,
+          fileId: attachment.fileId,
+          error: errorMessage,
+          updateType: body.edited_message ? "edited_message" : "message",
+        });
+      }
+    }
+
+    const messageText = typeof message.text === "string"
+      ? message.text
+      : typeof message.caption === "string"
+        ? message.caption
+        : "";
+
+    if (!messageText.trim()) {
+      if (!attachment) {
+        return Response.json({ ok: true }, { status: 200 });
+      }
+
+      if (!downloadedAttachmentPath) {
+        await sendTelegramMessage(message.chat.id, "첨부 파일 처리에 실패했습니다. 다시 보내 주세요.");
+        return Response.json({ ok: true }, { status: 200 });
+      }
+
+      await sendTelegramMessage(message.chat.id, `첨부 파일을 저장했습니다.\n경로: ${downloadedAttachmentPath}`);
       return Response.json({ ok: true }, { status: 200 });
     }
 
     const sessionId = await getSessionIdForChat(message.chat.id);
-    const command = parseCommand(message.text);
+    const command = parseCommand(messageText);
     await appendTelegramEventLog("message.command", {
       chatId: message.chat.id,
       commandKind: command.kind,
-      textLength: message.text.length,
+      textLength: messageText.length,
+      hasAttachment: Boolean(attachment),
       updateType: body.edited_message ? "edited_message" : "message",
     });
 
@@ -2156,11 +2310,15 @@ export async function POST(request: Request): Promise<Response> {
             await sendTelegramMessage(message.chat.id, `${command.message}\n도움이 필요하면 /h`);
             return;
           case "run":
-            if (!command.message.trim()) {
+            const runMessage = appendAttachmentContextToRunMessage(
+              command.message,
+              downloadedAttachmentPath,
+            );
+            if (!runMessage.trim()) {
               await sendTelegramMessage(message.chat.id, "실행할 내용이 비어 있습니다. /h 를 확인해 주세요.");
               return;
             }
-            await handleRunCommand(message.chat.id, sessionId, command.message);
+            await handleRunCommand(message.chat.id, sessionId, runMessage);
             return;
           default:
             await sendTelegramMessage(message.chat.id, "지원되지 않는 명령어입니다. /h 를 확인해 주세요.");
