@@ -1,0 +1,471 @@
+{
+  "version": "1.1",
+  "description": "Skill activation triggers customized for this project (Next.js App Router + TypeScript).",
+  "skills": {
+    "skill-developer": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Meta skill for Gemini skill/hooks/rules setup and debugging.",
+      "promptTriggers": {
+        "keywords": [
+          "skill",
+          "skills",
+          "스킬",
+          "skill-rules.json",
+          "hook",
+          "hooks",
+          "훅",
+          "에이전트",
+          "agent",
+          "코덱스 설정",
+          "codex settings"
+        ],
+        "intentPatterns": [
+          "(스킬|skill).*(추가|생성|수정|트리거|규칙|활성화|디버깅)",
+          "(훅|hook).*(설정|수정|추가|디버깅)",
+          "(create|add|modify|debug|update).*(skill|hook|skill-rules|codex settings)",
+          "(how|explain).*(skill|hook|trigger|activation)"
+        ]
+      }
+    },
+    "frontend-dev-guidelines": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Frontend patterns for this Next.js App Router + React + TypeScript project.",
+      "promptTriggers": {
+        "keywords": [
+          "frontend",
+          "프론트엔드",
+          "next",
+          "next.js",
+          "app router",
+          "react",
+          "component",
+          "컴포넌트",
+          "ui",
+          "페이지",
+          "page",
+          "styling",
+          "스타일"
+        ],
+        "intentPatterns": [
+          "(만들|추가|수정|구현|리팩터링).*(컴포넌트|페이지|ui|프론트엔드)",
+          "(create|add|build|update|edit|implement).*(component|page|ui|frontend|next)",
+          "(스타일|레이아웃|디자인).*(컴포넌트|페이지|ui)",
+          "(style|layout|design).*(component|page|ui)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "app/**/*.ts",
+          "app/**/*.tsx",
+          "components/**/*.ts",
+          "components/**/*.tsx",
+          "lib/**/*.ts",
+          "types/**/*.ts"
+        ],
+        "pathExclusions": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.d.ts"
+        ],
+        "contentPatterns": [
+          "'use client'",
+          "from 'next/",
+          "from \"next/",
+          "use(State|Effect|Memo|Callback|Ref)",
+          "export default function"
+        ]
+      }
+    },
+    "flutter-dev-guidelines": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Default entry skill for Flutter development. It supports new feature development and routes focused requests to architecture/testing/debugging/validation skills when needed.",
+      "promptTriggers": {
+        "keywords": [
+          "flutter",
+          "플러터",
+          "dart",
+          "다트",
+          "flutter 개발",
+          "플러터 개발",
+          "flutter 신규 개발",
+          "플러터 신규 개발",
+          "flutter new feature",
+          "flutter 구현",
+          "플러터 구현",
+          "flutter guide router",
+          "flutter skill router",
+          "flutter 스킬 라우터",
+          "flutter index",
+          "flutter 전체 플로우",
+          "flutter workflow",
+          "어떤 flutter 스킬",
+          "which flutter skill"
+        ],
+        "intentPatterns": [
+          "^(flutter|플러터|dart|다트)$",
+          "(flutter|플러터|dart|다트).*(개발|구현|생성|추가|수정|리팩터링|설계|신규)",
+          "(create|add|implement|build|develop|update|refactor).*(flutter|dart|feature|screen|widget)",
+          "(flutter|플러터).*(어떤|무슨|추천|분류|라우터|인덱스|전체 흐름|전체 플로우)",
+          "(which|what).*(flutter).*(skill|guideline|flow|route|router)",
+          "(flutter).*(workflow|orchestration|router|index)"
+        ]
+      }
+    },
+    "backend-dev-guidelines": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "medium",
+      "description": "Backend/API patterns for route handlers, services, validation, and data access.",
+      "promptTriggers": {
+        "keywords": [
+          "backend",
+          "백엔드",
+          "api",
+          "endpoint",
+          "엔드포인트",
+          "route",
+          "라우트",
+          "controller",
+          "service",
+          "middleware",
+          "validation",
+          "prisma",
+          "zod"
+        ],
+        "intentPatterns": [
+          "(백엔드|api|엔드포인트|라우트).*(추가|수정|구현|테스트|리팩터링)",
+          "(create|add|implement|build|fix).*(route|endpoint|api|controller|service|middleware)",
+          "(error|예외|에러).*(처리|핸들링|모니터링|sentry)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "app/api/**/*.ts",
+          "app/api/**/route.ts",
+          "backend/**/*.ts",
+          "server/**/*.ts",
+          "api/**/*.ts"
+        ],
+        "pathExclusions": [
+          "**/*.test.ts",
+          "**/*.spec.ts"
+        ],
+        "contentPatterns": [
+          "Next(Request|Response)",
+          "router\\.",
+          "app\\.(get|post|put|delete|patch)",
+          "export\\s+class\\s+.*(Controller|Service)",
+          "prisma\\.",
+          "zod"
+        ]
+      }
+    },
+    "route-tester": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "medium",
+      "description": "Guidelines for testing authenticated routes (JWT/cookie style auth).",
+      "promptTriggers": {
+        "keywords": [
+          "route test",
+          "test route",
+          "endpoint test",
+          "api test",
+          "라우트 테스트",
+          "엔드포인트 테스트",
+          "api 테스트",
+          "인증 테스트",
+          "jwt",
+          "cookie auth"
+        ],
+        "intentPatterns": [
+          "(라우트|엔드포인트|api).*(테스트|검증|디버깅)",
+          "(test|verify|debug).*(route|endpoint|api|auth|jwt|cookie)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "app/api/**/route.ts",
+          "**/routes/**/*.ts",
+          "scripts/test-*.js",
+          "scripts/test-*.ts"
+        ],
+        "contentPatterns": [
+          "router\\.(get|post|put|delete|patch)",
+          "app\\.(get|post|put|delete|patch)",
+          "cookies?\\(",
+          "authorization"
+        ]
+      }
+    },
+    "error-tracking": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Error handling and monitoring patterns, including Sentry integration.",
+      "promptTriggers": {
+        "keywords": [
+          "error handling",
+          "에러 처리",
+          "예외 처리",
+          "exception",
+          "monitoring",
+          "모니터링",
+          "sentry",
+          "captureexception",
+          "error tracking"
+        ],
+        "intentPatterns": [
+          "(에러|예외).*(추적|모니터링|sentry|핸들링)",
+          "(add|setup|implement|fix).*(sentry|error handling|monitoring|exception)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "app/api/**/*.ts",
+          "app/**/instrument.ts",
+          "lib/**/*.ts",
+          "server/**/*.ts",
+          "backend/**/*.ts"
+        ],
+        "contentPatterns": [
+          "@sentry",
+          "Sentry\\.",
+          "captureException",
+          "captureMessage",
+          "try\\s*\\{",
+          "throw\\s+new\\s+Error"
+        ]
+      }
+    },
+    "flutter-architecture-guidelines": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Flutter architecture guidance for MVVM + Clean Architecture, strong modeling boundaries, DI composition root, and Flutter Favorite package policy.",
+      "promptTriggers": {
+        "keywords": [
+          "flutter architecture",
+          "flutter 아키텍처",
+          "mvvm",
+          "clean architecture",
+          "클린 아키텍처",
+          "layered architecture",
+          "entity",
+          "dto",
+          "model",
+          "mapper",
+          "value object",
+          "immutable",
+          "repository",
+          "usecase",
+          "viewmodel",
+          "dependency injection",
+          "의존성 주입",
+          "composition root",
+          "get_it",
+          "injectable",
+          "flutter favorite",
+          "pub.dev package"
+        ],
+        "intentPatterns": [
+          "(flutter|dart|플러터|다트).*(아키텍처|설계|구현|리팩터링)",
+          "(mvvm|clean architecture|클린 아키텍처).*(적용|설계|구현|리팩터링)",
+          "(entity|dto|model|mapper|value object|immutable|모델|엔티티|매퍼|값 객체|불변).*(설계|분리|매핑|변환|마이그레이션)",
+          "(dependency injection|\\bdi\\b|get_it|injectable|composition root|의존성 주입|컴포지션 루트).*(구성|설정|주입|바인딩|리팩터링)",
+          "(flutter favorite|pub\\.dev).*(패키지|의존성|선정|검토|추가)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "lib/**/*.dart"
+        ],
+        "pathExclusions": [
+          "**/*.g.dart",
+          "**/*.freezed.dart",
+          "test/**/*.dart",
+          "integration_test/**/*.dart"
+        ],
+        "contentPatterns": [
+          "class\\s+\\w*Entity",
+          "class\\s+\\w*Dto",
+          "class\\s+\\w*Model",
+          "class\\s+\\w*Mapper",
+          "Repository",
+          "UseCase",
+          "GetIt",
+          "@injectable",
+          "configureDependencies|setupDependencies|initCompositionRoot"
+        ]
+      }
+    },
+    "flutter-testing-guidelines": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Flutter testing guidance for unit/widget/integration strategy, ViewModel test responsibilities, and test execution patterns.",
+      "promptTriggers": {
+        "keywords": [
+          "flutter test",
+          "테스트",
+          "unit test",
+          "단위 테스트",
+          "widget test",
+          "위젯 테스트",
+          "integration test",
+          "통합 테스트",
+          "test strategy",
+          "viewmodel test",
+          "상태 전이 테스트",
+          "mocktail",
+          "fake",
+          "flutter_test"
+        ],
+        "intentPatterns": [
+          "(flutter|dart|플러터|다트).*(테스트|test)",
+          "(unit|widget|integration|단위|위젯|통합).*(테스트|test)",
+          "(viewmodel|view model|뷰모델).*(테스트|상태 전이|state transition|loading)",
+          "(create|add|update|fix|write).*(test|tests|testing|unit test|widget test|integration test)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "test/**/*.dart",
+          "integration_test/**/*.dart"
+        ],
+        "pathExclusions": [
+          "**/*.g.dart",
+          "**/*.freezed.dart"
+        ],
+        "contentPatterns": [
+          "testWidgets\\(",
+          "group\\(",
+          "expect\\(",
+          "package:flutter_test/flutter_test\\.dart",
+          "IntegrationTestWidgetsFlutterBinding"
+        ]
+      }
+    },
+    "flutter-debugging-guidelines": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Flutter debugging guidance for Inspector/DevTools, lifecycle issues, platform troubleshooting, and performance bottleneck analysis.",
+      "promptTriggers": {
+        "keywords": [
+          "flutter debug",
+          "flutter debugging",
+          "디버깅",
+          "inspector",
+          "devtools",
+          "profiler",
+          "lifecycle",
+          "setstate called after dispose",
+          "메모리 누수",
+          "성능 병목",
+          "jank",
+          "frame drop",
+          "android manifest",
+          "info.plist",
+          "adb logcat"
+        ],
+        "intentPatterns": [
+          "(flutter|dart|플러터|다트).*(디버깅|debug|오류 분석|원인)",
+          "(inspector|devtools|profiler|cpu|memory|timeline).*(사용|분석|debug|디버깅)",
+          "(setstate\\(\\) called after dispose|lifecycle|생명주기).*(해결|수정|원인)",
+          "(android|ios|manifest|info\\.plist|gradle|pods).*(오류|이슈|디버깅|해결)",
+          "(성능|jank|frame|병목).*(분석|최적화|디버깅)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "android/**",
+          "ios/**"
+        ],
+        "pathExclusions": [
+          "**/*.g.dart",
+          "**/*.freezed.dart",
+          "test/**/*.dart",
+          "integration_test/**/*.dart"
+        ],
+        "contentPatterns": [
+          "FlutterError\\.onError",
+          "debugPrint",
+          "WidgetsBindingObserver",
+          "didChangeAppLifecycleState",
+          "setState\\(\\).*(dispose|mounted)",
+          "Timeline"
+        ]
+      }
+    },
+    "flutter-validation-gates": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Flutter validation gate guidance for G1~G5 (+G4b), evidence rules, and pass/fail judgment commands.",
+      "promptTriggers": {
+        "keywords": [
+          "flutter gate",
+          "validation gate",
+          "quality gate",
+          "검증 게이트",
+          "품질 게이트",
+          "증빙",
+          "evidence",
+          "g1",
+          "g2",
+          "g2b",
+          "g3",
+          "g4",
+          "g4b",
+          "g5",
+          "exit_code",
+          "pass fail"
+        ],
+        "intentPatterns": [
+          "(g1|g2|g2b|g3|g4|g4b|g5).*(게이트|gate|검증|validation|판정)",
+          "(flutter|플러터).*(검증|품질 게이트|완료 기준|증빙|evidence|pass|fail)",
+          "(ci|pipeline|pr).*(게이트|gate|exit_code|증빙)",
+          "(how|run|execute).*(flutter).*(gate|validation|evidence)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "dev/evidence/flutter/**"
+        ],
+        "contentPatterns": [
+          "exit_code=0",
+          "G[1-5] PASS",
+          "G4b PASS",
+          "No issues found!"
+        ]
+      }
+    }
+  },
+  "notes": {
+    "enforcement_types": {
+      "suggest": "Suggests a relevant skill without blocking execution.",
+      "block": "Blocks action until the required skill is used.",
+      "warn": "Shows a low-priority warning only."
+    },
+    "priority_levels": {
+      "critical": "Always show when matched.",
+      "high": "Show for strong matches.",
+      "medium": "Show for clear but less urgent matches.",
+      "low": "Show for optional context."
+    },
+    "customization": {
+      "pathPatterns": "Keep these aligned with actual project folders.",
+      "keywords": "Include both Korean and English user prompt styles.",
+      "intentPatterns": "Use broad regex first, then tighten if false positives appear."
+    }
+  }
+}

@@ -157,8 +157,8 @@ Trace 모드가 켜져 있으면 Codex CLI를 JSON 출력 모드로 실행합니
 이 프로젝트는 서버에서 Codex CLI를 직접 실행합니다.  
 현재 코드 기준으로 Codex 실행 파일은 아래 고정 경로 중 하나에 있어야 합니다.
 
-- `/Users/ethan/.bun/bin/codex`
-- `/Users/ethan/.npm-global/bin/codex`
+- `$HOME/.bun/bin/codex`
+- `$HOME/.npm-global/bin/codex`
 - `/opt/homebrew/bin/codex`
 - `/usr/local/bin/codex`
 - `CODEX_CLI_PATH` or `CODEX_PATH`
@@ -195,7 +195,7 @@ cp .env.local.template .env.local
 최소한 아래 항목부터 맞추는 것을 권장합니다.
 
 ```env
-AGENT_WORKSPACE_ROOT=/Users/yourname/Workspace
+AGENT_WORKSPACE_ROOT=$HOME/Workspace
 AGENT_PROTECTED_PATHS=codexia/.env.local
 ```
 

@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit:*",
+      "Write:*",
+      "MultiEdit:*",
+      "NotebookEdit:*",
+      "Bash:*"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${GEMINI_PROJECT_DIR:-$PWD}/.agents/workflows/hooks/skill-activation-prompt.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${GEMINI_PROJECT_DIR:-$PWD}/.agents/workflows/hooks/post-tool-use-tracker.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${GEMINI_PROJECT_DIR:-$PWD}/.agents/workflows/hooks/error-handling-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
