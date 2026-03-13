@@ -38,8 +38,9 @@ export const dynamic = "force-dynamic";
 
 const TELEGRAM_API_BASE_URL = "https://api.telegram.org/bot";
 const TELEGRAM_CHAT_TEXT_LIMIT = 4096;
-const TELEGRAM_STATUS_TEXT_LIMIT = 3600;
 const TELEGRAM_POLL_INTERVAL_MS = 1000;
+const TELEGRAM_PROGRESS_UPDATE_INTERVAL_MS = 1000;
+const TELEGRAM_PROGRESS_PREVIEW_LIMIT = getEnvInt("TELEGRAM_PROGRESS_PREVIEW_LIMIT", 320);
 const TELEGRAM_DEFAULT_TRACE_MODE = process.env.TELEGRAM_DEFAULT_TRACE_MODE !== "0";
 const TELEGRAM_SCREENSHOT_TEMP_DIR = path.join(process.cwd(), "data", "telegram-screenshots");
 const TELEGRAM_FILE_DOWNLOAD_DIR = path.join(process.cwd(), "data", "telegram-files");
@@ -90,10 +91,25 @@ const SIGNAL_STYLE_LABELS = {
   balanced: "균형형",
   aggressive: "공격형",
 } as const;
+const TELEGRAM_LOOP_EMOJI = "⏱";
 const SIGNAL_DEFAULT_STYLE = "conservative";
 const SIGNAL_RECOMMENDATION_DEFAULT_LIMIT = 5;
 const SIGNAL_RECOMMENDATION_MAX_LIMIT = 10;
 const SIGNAL_DISCLOSURE_TEXT = "판단 보조용이며 자동매매/투자자문이 아닙니다.";
+
+function getEnvInt(name: string, defaultValue: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return defaultValue;
+  }
+
+  return parsed;
+}
 
 type TelegramCommandStart =
   | { kind: "start"; code?: string }
@@ -671,6 +687,11 @@ function resolveReasoningByInput(raw: string): string | null {
     return null;
   }
 
+  const numeric = Number.parseInt(trimmed, 10);
+  if (Number.isInteger(numeric) && numeric >= 1 && numeric <= SUPPORTED_REASONING_EFFORTS.length) {
+    return SUPPORTED_REASONING_EFFORTS[numeric - 1];
+  }
+
   const rawLower = trimmed.toLowerCase();
   if (rawLower === "최소") {
     return "minimal";
@@ -689,10 +710,6 @@ function resolveReasoningByInput(raw: string): string | null {
   }
 
   const normalized = rawLower.replace(/[^a-z]/g, "");
-  const numeric = Number.parseInt(normalized, 10);
-  if (Number.isInteger(numeric) && numeric >= 1 && numeric <= SUPPORTED_REASONING_EFFORTS.length) {
-    return SUPPORTED_REASONING_EFFORTS[numeric - 1];
-  }
 
   const exact = SUPPORTED_REASONING_EFFORTS.find(
     (reasoning) => reasoning.toLowerCase() === normalized,
@@ -1492,25 +1509,73 @@ function splitTelegramText(text: string, limit: number): string[] {
   return chunks;
 }
 
-function truncateForStatus(text: string): string {
-  if (text.length <= TELEGRAM_STATUS_TEXT_LIMIT) {
-    return text;
+function formatProgressPreview(text: string): string | null {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return null;
   }
-  return `${text.slice(0, TELEGRAM_STATUS_TEXT_LIMIT - 3)}...`;
+
+  const shouldTruncate = normalized.length > TELEGRAM_PROGRESS_PREVIEW_LIMIT;
+  const previewLength = shouldTruncate
+    ? Math.max(1, TELEGRAM_PROGRESS_PREVIEW_LIMIT - 1)
+    : TELEGRAM_PROGRESS_PREVIEW_LIMIT;
+  const preview = normalized.slice(0, previewLength);
+  if (!preview) {
+    return null;
+  }
+
+  return `미리보기:\n${preview}${shouldTruncate ? "." : ""}`;
 }
 
-function formatStatusText(message: string, elapsedSeconds: number, status: string): string {
-  const safeMessage = message.trim();
-  if (!safeMessage) {
-    return `⏱ ${elapsedSeconds}초 동안 응답 생성 중...`;
+function formatTelegramLoopStatus(status: string): string {
+  switch (status) {
+    case "queued":
+      return "대기중";
+    case "running":
+      return "진행중";
+    case "completed":
+      return "완료";
+    case "failed":
+      return "실패";
+    default:
+      return status;
   }
+}
 
-  const preview = truncateForStatus(safeMessage);
-  return [
-    `상태: ${status} (${elapsedSeconds}초)`,
-    `미리보기:`,
-    preview,
-  ].join("\n");
+function buildWaitingText(elapsedSeconds: number): string {
+  return `${TELEGRAM_LOOP_EMOJI} 응답 대기중 입니다. (${elapsedSeconds}초)`;
+}
+
+function buildStatusText(
+  elapsedSeconds: number,
+  status: string,
+  summary: string,
+  preview: string | null,
+): string {
+  const lines = [
+    `${TELEGRAM_LOOP_EMOJI} 작업상태 : ${formatTelegramLoopStatus(status)} (${elapsedSeconds}초)`,
+  ];
+  if (summary.trim()) {
+    lines.push(summary);
+  }
+  if (preview) {
+    lines.push("", preview);
+  }
+  return lines.join("\n");
+}
+
+function formatStatusText(
+  elapsedSeconds: number,
+  status: string,
+  traceEnabled: boolean,
+  assistantText: string,
+): string {
+  return buildStatusText(
+    elapsedSeconds,
+    status,
+    traceEnabled ? "진행 상황을 확인 중입니다." : "응답 생성 중...",
+    formatProgressPreview(assistantText),
+  );
 }
 
 async function callTelegramApi<T>(method: string, payload: Record<string, unknown>): Promise<T> {
@@ -1680,6 +1745,7 @@ async function waitForJobAndSendResult(chatId: number, jobId: string, progressMe
   const startTime = Date.now();
   let lastProgress = "";
   let lastStatusTime = 0;
+  let lastPreview: string | null = null;
 
   while (true) {
     const job = await getAgentJob(jobId);
@@ -1689,42 +1755,52 @@ async function waitForJobAndSendResult(chatId: number, jobId: string, progressMe
     }
 
     const elapsed = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
-    const shouldUpdateStatus = traceEnabled &&
-      (lastProgress !== job.assistantText || Date.now() - lastStatusTime > 3000);
-
-    if (shouldUpdateStatus) {
-      const nextProgress = formatStatusText(job.assistantText, elapsed, job.status);
-      if (nextProgress !== lastProgress) {
-        await editTelegramMessage(chatId, progressMessageId, nextProgress);
-        lastProgress = nextProgress;
-        lastStatusTime = Date.now();
-      }
-    }
 
     if (job.status === "completed" || job.status === "failed") {
+      const finalStatusText = buildStatusText(
+        elapsed,
+        job.status,
+        job.status === "failed"
+          ? "오류 내용은 새 메시지로 전송했습니다."
+          : "최종 결과는 새 메시지로 전송했습니다.",
+        lastPreview,
+        { completed: job.status === "completed" },
+      );
+
       if (job.status === "failed") {
         const reason = job.error?.trim() || "실행 중 오류가 발생했습니다.";
+        await sendTelegramMessage(chatId, `실행 실패: ${reason}`);
         await editTelegramMessage(
           chatId,
           progressMessageId,
-          `작업 실패 (${elapsed}초)\n오류 내용을 새 메시지로 전송했습니다.`,
+          finalStatusText,
         );
-        await sendTelegramMessage(chatId, `실행 실패: ${reason}`);
         return;
       }
 
       const finalText = job.assistantText.trim() || "응답이 비어 있습니다.";
+      await sendTelegramMessage(chatId, finalText);
       await editTelegramMessage(
         chatId,
         progressMessageId,
-        `작업 완료 (${elapsed}초)\n최종 결과를 새 메시지로 전송했습니다.`,
+        finalStatusText,
       );
-      await sendTelegramMessage(chatId, finalText);
       return;
     }
 
-    if (job.status === "running" && !traceEnabled && Date.now() - lastStatusTime > 4000) {
-      await editTelegramMessage(chatId, progressMessageId, `응답 생성 중 (${elapsed}초)`);
+    const shouldUpdateStatus = Date.now() - lastStatusTime >= TELEGRAM_PROGRESS_UPDATE_INTERVAL_MS;
+    const hasAssistantResponse = job.assistantText.trim().length > 0;
+    if (shouldUpdateStatus) {
+      const nextProgress = hasAssistantResponse
+        ? formatStatusText(elapsed, job.status, traceEnabled, job.assistantText)
+        : buildWaitingText(elapsed);
+      if (nextProgress !== lastProgress) {
+        await editTelegramMessage(chatId, progressMessageId, nextProgress);
+        lastProgress = nextProgress;
+      }
+      if (hasAssistantResponse) {
+        lastPreview = formatProgressPreview(job.assistantText);
+      }
       lastStatusTime = Date.now();
     }
 
@@ -1843,13 +1919,7 @@ async function handleRunCommand(
       trace: validation.data.trace,
       source: "telegram",
     });
-    const runHeader = [
-      `요청 접수됨. 작업 ID: ${job.jobId}`,
-      `모델: ${getModelLabel(validation.data.model)} / 사고수준: ${formatReasoningLabel(validation.data.reasoningEffort)}`,
-      "응답 생성 중...",
-    ].join("\n");
-
-    const initial = await sendTelegramMessage(chatId, runHeader);
+    const initial = await sendTelegramMessage(chatId, buildWaitingText(0));
     await waitForJobAndSendResult(chatId, job.jobId, initial.message_id, getTraceMode(sessionId));
   } catch (error) {
     if (isActiveJobError(error)) {
@@ -1994,10 +2064,16 @@ async function handleSessionInfoCommand(chatId: number, sessionId: string): Prom
 
 type SessionSwitchResult = {
   targetSessionId: string;
+  targetSessionTitle?: string | null;
   switched: boolean;
   found: boolean;
   message: string;
 };
+
+function formatSessionTitleLabel(title?: string | null): string {
+  const normalized = title?.trim();
+  return normalized && normalized.length > 0 ? normalized : "(미설정)";
+}
 
 function formatTelegramJobTime(iso?: string): string {
   if (!iso) {
@@ -2079,12 +2155,18 @@ async function buildCrossSessionCompletionNotice(chatId: number, targetSessionId
   return ["다른 세션에서 종료된 작업이 있습니다.", ...lines].join("\n");
 }
 
-function buildSessionSwitchedText(targetSessionId: string, switched: boolean): string {
+function buildSessionSwitchedText(
+  targetSessionId: string,
+  targetSessionTitle: string | null,
+  switched: boolean,
+): string {
+  const titleLine = `세션 제목: ${formatSessionTitleLabel(targetSessionTitle)}`;
+
   if (!switched) {
-    return `이미 현재 세션입니다: ${targetSessionId}`;
+    return `이미 현재 세션입니다: ${targetSessionId}\n${titleLine}`;
   }
 
-  return `세션을 전환했습니다.\n현재 세션: ${targetSessionId}\n이제부터 이 세션 컨텍스트에서 계속 진행됩니다.`;
+  return `세션을 전환했습니다.\n현재 세션: ${targetSessionId}\n${titleLine}\n이제부터 이 세션 컨텍스트에서 계속 진행됩니다.`;
 }
 
 async function switchSession(
@@ -2099,23 +2181,28 @@ async function switchSession(
   });
 
   if (targetSessionId === currentSessionId) {
+    const targetSession = await loadSession(targetSessionId);
+    const targetSessionTitle = targetSession.title?.trim() || null;
     await appendTelegramEventLog("session_switch.result", {
       chatId,
       targetSessionId,
       currentSessionId,
       switched: false,
       found: true,
+      targetSessionTitle,
       reason: "already_current",
     });
     return {
       targetSessionId,
+      targetSessionTitle,
       switched: false,
       found: true,
-      message: buildSessionSwitchedText(targetSessionId, false),
+      message: buildSessionSwitchedText(targetSessionId, targetSessionTitle, false),
     };
   }
 
-  await loadSession(targetSessionId);
+  const targetSession = await loadSession(targetSessionId);
+  const targetSessionTitle = targetSession.title?.trim() || null;
   await setSessionOverride(chatId, targetSessionId);
   const completionNotice = await buildCrossSessionCompletionNotice(chatId, targetSessionId);
   await appendTelegramEventLog("session_switch.result", {
@@ -2124,15 +2211,17 @@ async function switchSession(
     currentSessionId,
     switched: true,
     found: true,
+    targetSessionTitle,
     hasCompletionNotice: Boolean(completionNotice),
   });
   return {
     targetSessionId,
+    targetSessionTitle,
     switched: true,
     found: true,
     message: completionNotice
-      ? `${buildSessionSwitchedText(targetSessionId, true)}\n\n${completionNotice}`
-      : buildSessionSwitchedText(targetSessionId, true),
+      ? `${buildSessionSwitchedText(targetSessionId, targetSessionTitle, true)}\n\n${completionNotice}`
+      : buildSessionSwitchedText(targetSessionId, targetSessionTitle, true),
   };
 }
 
