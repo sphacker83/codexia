@@ -23,6 +23,14 @@ export function TopMenuBar() {
           >
             시그널
           </Link>
+          <a
+            href="http://127.0.0.1:18080"
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-md border border-[var(--theme-border)] bg-[var(--theme-surface-soft)] px-2 py-1.5 text-xs font-semibold text-[var(--theme-muted)] transition hover:opacity-90 sm:px-3"
+          >
+            Adminer
+          </a>
           <Link
             href="/agent?new=1"
             className="rounded-md bg-[var(--theme-accent)] px-2 py-1.5 text-xs font-semibold text-[var(--theme-accent-fg)] transition hover:opacity-90 sm:px-3"

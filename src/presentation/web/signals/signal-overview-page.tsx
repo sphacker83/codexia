@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import type { SignalsOverviewResponse } from "@/src/core/signals/types";
+import { getSignalStatusToneClasses } from "@/src/presentation/web/signals/signal-status-tone";
 
 function formatDateTime(value: string): string {
   const date = new Date(value);
@@ -17,15 +18,15 @@ function formatDateTime(value: string): string {
 function getStatusTone(status: SignalsOverviewResponse["health"]["status"]): string {
   switch (status) {
     case "healthy":
-      return "border-emerald-500/40 bg-emerald-500/10 text-emerald-200";
+      return getSignalStatusToneClasses("success");
     case "degraded":
-      return "border-amber-500/40 bg-amber-500/10 text-amber-100";
+      return getSignalStatusToneClasses("warning");
     case "stale":
-      return "border-red-500/40 bg-red-500/10 text-red-200";
+      return getSignalStatusToneClasses("danger");
     case "failed":
-      return "border-rose-500/40 bg-rose-500/10 text-rose-100";
+      return getSignalStatusToneClasses("danger");
     default:
-      return "border-sky-500/40 bg-sky-500/10 text-sky-100";
+      return getSignalStatusToneClasses("info");
   }
 }
 
@@ -88,7 +89,7 @@ export function SignalOverviewPage({ payload }: SignalOverviewPageProps) {
                   {payload.dataMode === "demo" ? "DEMO SNAPSHOT" : "LIVE SNAPSHOT"}
                 </span>
                 {payload.stale ? (
-                  <span className="rounded-full border border-red-500/40 bg-red-500/10 px-3 py-1 text-red-200">
+                  <span className={`rounded-full border px-3 py-1 ${getSignalStatusToneClasses("danger")}`}>
                     STALE SNAPSHOT
                   </span>
                 ) : null}
@@ -141,7 +142,7 @@ export function SignalOverviewPage({ payload }: SignalOverviewPageProps) {
             </div>
           </div>
 
-          <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${getSignalStatusToneClasses("warning")}`}>
             {payload.disclaimer}
           </div>
         </header>

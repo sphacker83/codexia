@@ -64,14 +64,6 @@ export function AgentMessageList({
                     ) : (
                       <MessageContent content={message.content} />
                     )}
-
-                    {message.status === "done" && message.usage ? (
-                      <p className="mt-2 border-t border-[var(--theme-border)] pt-2 text-[11px] text-[var(--theme-muted)]">
-                        토큰 사용량 · 입력 {message.usage.inputTokens.toLocaleString()} / 캐시{" "}
-                        {message.usage.cachedInputTokens.toLocaleString()} / 출력{" "}
-                        {message.usage.outputTokens.toLocaleString()}
-                      </p>
-                    ) : null}
                   </div>
                 ) : (
                   <p className="whitespace-pre-wrap break-words">{message.content}</p>

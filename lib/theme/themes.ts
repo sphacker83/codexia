@@ -11,6 +11,18 @@ type ThemeVariables = {
   "--theme-accent-fg": string;
   "--theme-glow-a": string;
   "--theme-glow-b": string;
+  "--theme-status-success-border": string;
+  "--theme-status-success-bg": string;
+  "--theme-status-success-fg": string;
+  "--theme-status-warning-border": string;
+  "--theme-status-warning-bg": string;
+  "--theme-status-warning-fg": string;
+  "--theme-status-danger-border": string;
+  "--theme-status-danger-bg": string;
+  "--theme-status-danger-fg": string;
+  "--theme-status-info-border": string;
+  "--theme-status-info-bg": string;
+  "--theme-status-info-fg": string;
 };
 
 export interface ThemeOption {
@@ -39,6 +51,18 @@ export const THEME_OPTIONS: ThemeOption[] = [
       "--theme-accent-fg": "#3b1708",
       "--theme-glow-a": "rgba(255, 138, 91, 0.26)",
       "--theme-glow-b": "rgba(255, 214, 125, 0.24)",
+      "--theme-status-success-border": "rgba(37, 99, 55, 0.28)",
+      "--theme-status-success-bg": "rgba(46, 125, 50, 0.12)",
+      "--theme-status-success-fg": "#1f6a31",
+      "--theme-status-warning-border": "rgba(180, 83, 9, 0.28)",
+      "--theme-status-warning-bg": "rgba(245, 158, 11, 0.16)",
+      "--theme-status-warning-fg": "#9a4d00",
+      "--theme-status-danger-border": "rgba(185, 28, 28, 0.24)",
+      "--theme-status-danger-bg": "rgba(220, 38, 38, 0.12)",
+      "--theme-status-danger-fg": "#a61b1b",
+      "--theme-status-info-border": "rgba(37, 99, 235, 0.22)",
+      "--theme-status-info-bg": "rgba(59, 130, 246, 0.12)",
+      "--theme-status-info-fg": "#1d4ed8",
     },
   },
   {
@@ -56,6 +80,18 @@ export const THEME_OPTIONS: ThemeOption[] = [
       "--theme-accent-fg": "#111111",
       "--theme-glow-a": "rgba(154, 154, 154, 0.24)",
       "--theme-glow-b": "rgba(86, 86, 86, 0.22)",
+      "--theme-status-success-border": "rgba(52, 211, 153, 0.34)",
+      "--theme-status-success-bg": "rgba(16, 185, 129, 0.16)",
+      "--theme-status-success-fg": "#b7f7da",
+      "--theme-status-warning-border": "rgba(251, 191, 36, 0.34)",
+      "--theme-status-warning-bg": "rgba(245, 158, 11, 0.16)",
+      "--theme-status-warning-fg": "#fde7a3",
+      "--theme-status-danger-border": "rgba(248, 113, 113, 0.34)",
+      "--theme-status-danger-bg": "rgba(239, 68, 68, 0.16)",
+      "--theme-status-danger-fg": "#fecaca",
+      "--theme-status-info-border": "rgba(96, 165, 250, 0.34)",
+      "--theme-status-info-bg": "rgba(59, 130, 246, 0.16)",
+      "--theme-status-info-fg": "#cfe6ff",
     },
   },
   {
@@ -73,6 +109,18 @@ export const THEME_OPTIONS: ThemeOption[] = [
       "--theme-accent-fg": "#052522",
       "--theme-glow-a": "rgba(78, 205, 196, 0.28)",
       "--theme-glow-b": "rgba(111, 173, 255, 0.22)",
+      "--theme-status-success-border": "rgba(52, 211, 153, 0.34)",
+      "--theme-status-success-bg": "rgba(16, 185, 129, 0.14)",
+      "--theme-status-success-fg": "#bcf7e0",
+      "--theme-status-warning-border": "rgba(251, 191, 36, 0.34)",
+      "--theme-status-warning-bg": "rgba(245, 158, 11, 0.14)",
+      "--theme-status-warning-fg": "#ffe6a6",
+      "--theme-status-danger-border": "rgba(248, 113, 113, 0.34)",
+      "--theme-status-danger-bg": "rgba(239, 68, 68, 0.14)",
+      "--theme-status-danger-fg": "#ffd0d0",
+      "--theme-status-info-border": "rgba(96, 165, 250, 0.34)",
+      "--theme-status-info-bg": "rgba(59, 130, 246, 0.14)",
+      "--theme-status-info-fg": "#d6e8ff",
     },
   },
   {
@@ -90,6 +138,18 @@ export const THEME_OPTIONS: ThemeOption[] = [
       "--theme-accent-fg": "#1b2b14",
       "--theme-glow-a": "rgba(139, 209, 124, 0.24)",
       "--theme-glow-b": "rgba(63, 155, 123, 0.2)",
+      "--theme-status-success-border": "rgba(74, 222, 128, 0.32)",
+      "--theme-status-success-bg": "rgba(34, 197, 94, 0.14)",
+      "--theme-status-success-fg": "#d5f7d2",
+      "--theme-status-warning-border": "rgba(250, 204, 21, 0.32)",
+      "--theme-status-warning-bg": "rgba(234, 179, 8, 0.14)",
+      "--theme-status-warning-fg": "#f7ebb5",
+      "--theme-status-danger-border": "rgba(248, 113, 113, 0.32)",
+      "--theme-status-danger-bg": "rgba(239, 68, 68, 0.14)",
+      "--theme-status-danger-fg": "#ffd2d2",
+      "--theme-status-info-border": "rgba(125, 211, 252, 0.32)",
+      "--theme-status-info-bg": "rgba(14, 165, 233, 0.14)",
+      "--theme-status-info-fg": "#d9f1ff",
     },
   },
 ];

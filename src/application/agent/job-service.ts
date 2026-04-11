@@ -11,7 +11,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   buildPromptWithMeta,
 } from "@/src/core/agent/prompt-builder";
-import { getModelContextLength } from "@/src/core/agent/models";
+import { getModelContextLength, getModelProvider } from "@/src/core/agent/models";
 import {
   appendMessage,
   createMessage,
@@ -19,9 +19,11 @@ import {
   loadExistingSession,
   loadSession,
   recordUserTurn,
+  setSessionProviderSession,
   setSessionTitleIfMissing,
   setSessionActiveJob,
 } from "@/src/infrastructure/agent/session-file-store";
+import { writeTextFileAtomically } from "@/src/infrastructure/atomic-file";
 import { getAgentSystemPrompt } from "@/src/core/workspace/policy";
 import type {
   AgentJob,
@@ -54,12 +56,13 @@ interface CreateAgentJobInput {
 }
 
 interface CodexJsonEvent {
-  type?: string;
+  type?: "thread.started" | "turn.started" | "turn.completed" | "turn.failed" | "error" | "item.started" | "item.completed";
+  thread_id?: string;
+  message?: string;
   item?: {
-    type?: string;
+    type?: "agent_message" | "command_execution" | "reasoning";
     text?: string;
     command?: string;
-    status?: "in_progress" | "completed";
     exit_code?: number | null;
   };
   usage?: AgentJobUsage;
@@ -121,6 +124,17 @@ function toErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function formatUsageFooter(usage?: AgentJobUsage): string {
+  if (!usage) {
+    return "";
+  }
+
+  return [
+    "",
+    `토큰 사용량: 입력 ${(usage.input_tokens || 0).toLocaleString()} / 캐시 ${(usage.cached_input_tokens || 0).toLocaleString()} / 출력 ${(usage.output_tokens || 0).toLocaleString()}`,
+  ].join("\n");
+}
+
 function assertValidJobId(jobId: string): void {
   if (!JOB_ID_PATTERN.test(jobId)) {
     throw new Error("Invalid jobId format.");
@@ -175,10 +189,10 @@ async function readJobFile(jobId: string): Promise<AgentJob | null> {
 }
 
 async function writeJobFile(job: AgentJob): Promise<void> {
-  await ensureJobsDirectory();
   const filePath = getJobFilePath(job.jobId);
   const payload = `${JSON.stringify(job, null, 2)}\n`;
-  await fs.writeFile(filePath, payload, "utf8");
+  await ensureJobsDirectory();
+  await writeTextFileAtomically(filePath, payload);
 }
 
 function appendEvent(job: AgentJob, event: AgentJobEventInput): AgentJobEvent {
@@ -412,6 +426,15 @@ async function executeCodexTraceJob(
       return;
     }
 
+    if (event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id) {
+      await persistCodexSessionThread(job.sessionId, event.thread_id);
+      return;
+    }
+
+    if (event.type === "error" && event.message) {
+      throw new Error(event.message);
+    }
+
     if (event.type === "item.started" && event.item?.type === "command_execution") {
       appendEvent(job, {
         type: "command",
@@ -634,6 +657,11 @@ async function executeFastJob(
   startedAtMs: number,
   runner: RunAgentCliResult,
 ): Promise<void> {
+  if (runner.runner === "codex") {
+    await executeCodexFastJob(job, startedAtMs, runner);
+    return;
+  }
+
   const reader = runner.stream.getReader();
   const decoder = new TextDecoder();
   let ttfbLogged = false;
@@ -664,6 +692,140 @@ async function executeFastJob(
   }
 }
 
+async function persistCodexSessionThread(sessionId: string, threadId: string): Promise<void> {
+  await setSessionProviderSession(sessionId, "codex", threadId);
+}
+
+async function executeCodexFastJob(
+  job: AgentJob,
+  startedAtMs: number,
+  runner: RunAgentCliResult,
+): Promise<void> {
+  const reader = runner.stream.getReader();
+  const decoder = new TextDecoder();
+  let lineBuffer = "";
+  let ttfbLogged = false;
+
+  const handleJsonLine = async (line: string): Promise<void> => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    let event: CodexJsonEvent;
+    try {
+      event = JSON.parse(trimmed) as CodexJsonEvent;
+    } catch {
+      return;
+    }
+
+    if (event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id) {
+      await persistCodexSessionThread(job.sessionId, event.thread_id);
+      return;
+    }
+
+    if (event.type === "error" && event.message) {
+      throw new Error(event.message);
+    }
+
+    if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
+      job.assistantText = event.item.text;
+      appendEvent(job, { type: "chunk", text: event.item.text });
+      await persistJob(job);
+      return;
+    }
+
+    if (event.type === "turn.completed" && event.usage) {
+      job.usage = event.usage;
+      appendEvent(job, { type: "usage", usage: event.usage });
+      await persistJob(job);
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      const chunk = decoder.decode(value, { stream: true });
+      if (!chunk) {
+        continue;
+      }
+      if (!ttfbLogged) {
+        ttfbLogged = true;
+        recordFirstByteLatency(job, startedAtMs, "fast");
+      }
+      lineBuffer += chunk;
+      while (true) {
+        const newlineIndex = lineBuffer.indexOf("\n");
+        if (newlineIndex < 0) {
+          break;
+        }
+        const line = lineBuffer.slice(0, newlineIndex);
+        lineBuffer = lineBuffer.slice(newlineIndex + 1);
+        await handleJsonLine(line);
+      }
+    }
+    lineBuffer += decoder.decode();
+    if (lineBuffer.trim()) {
+      await handleJsonLine(lineBuffer);
+    }
+    await runner.completed;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+type ResolvedJobPrompt = {
+  prompt: string;
+  contextMeta?: AgentJob["contextMeta"];
+  providerSessionId?: string;
+  mode: "provider-resume" | "fresh-start";
+};
+
+function shouldUseCodexProviderResume(job: AgentJob, session: Session): boolean {
+  return (
+    getModelProvider(job.model) === "codex" &&
+    session.providerSessionProvider === "codex" &&
+    Boolean(session.providerSessionId)
+  );
+}
+
+function resolveJobPrompt(
+  job: AgentJob,
+  session: Session,
+): ResolvedJobPrompt {
+  // Codex resume는 provider thread continuity만 신뢰한다.
+  // 같은 스레드를 이어가는 동안 로컬 conversation/system prompt를 다시 붙이면
+  // 중복 컨텍스트가 생기고 토큰만 불어난다.
+  if (shouldUseCodexProviderResume(job, session)) {
+    return {
+      prompt: job.message,
+      providerSessionId: session.providerSessionId!,
+      mode: "provider-resume",
+    };
+  }
+
+  const disableDynamicContext = process.env.AGENT_DISABLE_DYNAMIC_CONTEXT === "1";
+  const { prompt, meta } = buildPromptWithMeta({
+    session,
+    userMessage: job.message,
+    systemPrompt: getAgentSystemPrompt(DEFAULT_SYSTEM_PROMPT, {
+      channel: job.source === "telegram" ? "telegram" : "web",
+    }),
+    maxContextLength: getModelContextLength(job.model),
+    disableDynamicContext,
+  });
+
+  return {
+    prompt,
+    contextMeta: meta,
+    mode: "fresh-start",
+  };
+}
+
 async function runJob(jobId: string): Promise<void> {
   if (runningJobIds.has(jobId)) {
     return;
@@ -691,20 +853,19 @@ async function runJob(jobId: string): Promise<void> {
 
     const session = await loadSession(job.sessionId);
     const shouldSetAutoTitle = session.messages.length === 0 && !session.title?.trim();
-    const disableDynamicContext = process.env.AGENT_DISABLE_DYNAMIC_CONTEXT === "1";
-    const { prompt, meta } = buildPromptWithMeta({
-      session,
-      userMessage: job.message,
-      systemPrompt: getAgentSystemPrompt(DEFAULT_SYSTEM_PROMPT, {
-        channel: job.source === "telegram" ? "telegram" : "web",
-      }),
-      maxContextLength: getModelContextLength(job.model),
-      disableDynamicContext,
-    });
-    job.contextMeta = meta;
-    console.info(
-      `[AgentJob:${job.jobId}] prompt=${meta.promptLength} chars, context=${meta.appliedContextLength}/${meta.requestedContextLength}, budget=${meta.conversationBudget}, selected=${meta.selectedMessageCount}, dropped=${meta.droppedMessageCount}`,
-    );
+    const promptState = resolveJobPrompt(job, session);
+    const prompt = promptState.prompt;
+    job.contextMeta = promptState.contextMeta;
+    if (promptState.contextMeta) {
+      const meta = promptState.contextMeta;
+      console.info(
+        `[AgentJob:${job.jobId}] mode=${promptState.mode}, prompt=${meta.promptLength} chars, context=${meta.appliedContextLength}/${meta.requestedContextLength}, budget=${meta.conversationBudget}, selected=${meta.selectedMessageCount}, dropped=${meta.droppedMessageCount}`,
+      );
+    } else {
+      console.info(
+        `[AgentJob:${job.jobId}] mode=${promptState.mode}, prompt=${prompt.length} chars, provider-resume=${promptState.providerSessionId ? "on" : "off"}`,
+      );
+    }
 
     const disableParallelSessionWrite = process.env.AGENT_DISABLE_PARALLEL_SESSION_WRITE === "1";
     const persistUserTurnPromise = recordUserTurn(job.sessionId, {
@@ -718,11 +879,13 @@ async function runJob(jobId: string): Promise<void> {
     const startedAtMs = Date.parse(job.startedAt || nowIso());
 
     try {
+      const usesJsonOutput = job.trace || getModelProvider(job.model) === "codex";
       const runner = runAgentCli({
         prompt,
         model: job.model,
         reasoningEffort: job.reasoningEffort,
-        jsonOutput: job.trace,
+        jsonOutput: usesJsonOutput,
+        sessionId: promptState.providerSessionId,
       });
       runningJobCancels.set(job.jobId, runner.cancel);
 
@@ -741,10 +904,11 @@ async function runJob(jobId: string): Promise<void> {
         await persistUserTurnPromise;
       }
 
-      const finalText = job.assistantText.trim() || "응답이 비어 있습니다.";
+      const baseFinalText = job.assistantText.trim() || "응답이 비어 있습니다.";
+      const finalText = `${baseFinalText}${formatUsageFooter(job.usage)}`;
       await appendMessage(job.sessionId, createMessage("assistant", finalText));
       if (shouldSetAutoTitle) {
-        await setSessionTitleIfMissing(job.sessionId, finalText);
+        await setSessionTitleIfMissing(job.sessionId, baseFinalText);
       }
 
       job.assistantText = finalText;

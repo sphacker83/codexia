@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import type { SignalAssetResponse } from "@/src/core/signals/types";
+import { getSignalStatusToneClasses } from "@/src/presentation/web/signals/signal-status-tone";
 
 function formatDateTime(value: string): string {
   const date = new Date(value);
@@ -53,7 +54,7 @@ export function SignalAssetPage({ ticker, payload }: SignalAssetPageProps) {
                   {payload.dataMode === "demo" ? "DEMO SNAPSHOT" : "LIVE SNAPSHOT"}
                 </span>
                 {payload.stale ? (
-                  <span className="rounded-full border border-red-500/40 bg-red-500/10 px-3 py-1 text-red-200">
+                  <span className={`rounded-full border px-3 py-1 ${getSignalStatusToneClasses("danger")}`}>
                     STALE SNAPSHOT
                   </span>
                 ) : null}

@@ -32,10 +32,20 @@ interface TelegramApiResponse<T> {
   description?: string;
 }
 
+const TELEGRAM_POLLER_CONFLICT_EXIT_CODE = 20;
+
 const TELEGRAM_EVENT_LOG_FILE = nodePath.resolve(
   process.cwd(),
   process.env.TELEGRAM_EVENT_LOG_FILE?.trim() || "data/telegram-events.log",
 );
+const DEFAULT_POLLER_LOCK_FILE = nodePath.resolve(
+  process.cwd(),
+  process.env.TELEGRAM_POLLER_LOCK_FILE?.trim() || "data/telegram-poller.lock",
+);
+
+interface PollerLockHandle {
+  release: () => Promise<void>;
+}
 
 async function appendPollerEventLog(
   event: string,
@@ -152,6 +162,10 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function isGetUpdatesConflictMessage(message: string): boolean {
+  return message.includes("getUpdates failed: Conflict:");
+}
+
 async function readOffset(statePath: string): Promise<number> {
   try {
     const raw = await fs.readFile(statePath, "utf8");
@@ -171,6 +185,73 @@ async function writeOffset(statePath: string, nextOffset: number): Promise<void>
   const payload = `${JSON.stringify({ nextOffset, updatedAt: new Date().toISOString() })}\n`;
   await fs.mkdir(nodePath.dirname(statePath), { recursive: true });
   await fs.writeFile(statePath, payload, "utf8");
+}
+
+async function isProcessAlive(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : "";
+    if (code === "EPERM") {
+      return true;
+    }
+    return false;
+  }
+}
+
+async function acquirePollerLock(lockPath: string): Promise<PollerLockHandle> {
+  await fs.mkdir(nodePath.dirname(lockPath), { recursive: true });
+
+  let lockFile: import("node:fs/promises").FileHandle | null = null;
+
+  try {
+    lockFile = await fs.open(lockPath, "wx");
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : "";
+    if (code !== "EEXIST") {
+      throw error;
+    }
+
+    try {
+      const raw = await fs.readFile(lockPath, "utf8");
+      const parsed = JSON.parse(raw) as { pid?: unknown };
+      const pid = Number.parseInt(String(parsed.pid ?? ""), 10);
+      if (await isProcessAlive(pid)) {
+        throw new Error(`another poller instance is already running (pid: ${pid})`);
+      }
+    } catch (readError) {
+      if (readError instanceof Error && readError.message.includes("already running")) {
+        throw readError;
+      }
+    }
+
+    await fs.rm(lockPath, { force: true });
+    lockFile = await fs.open(lockPath, "wx");
+  }
+
+  const payload = `${JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  })}\n`;
+  await lockFile.writeFile(payload, "utf8");
+
+  let released = false;
+
+  return {
+    release: async () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      await lockFile?.close().catch(() => undefined);
+      await fs.rm(lockPath, { force: true }).catch(() => undefined);
+    },
+  };
 }
 
 async function callGetUpdates(
@@ -246,6 +327,7 @@ async function runTelegramPoller(): Promise<void> {
   await loadEnvFile();
 
   const botToken = getTelegramBotToken();
+  const lockHandle = await acquirePollerLock(DEFAULT_POLLER_LOCK_FILE);
 
   const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET?.trim() || "";
   const localEndpoint =
@@ -289,81 +371,92 @@ async function runTelegramPoller(): Promise<void> {
     }
   });
 
-  while (running) {
-    try {
-      const updates = await callGetUpdates(botToken, nextOffset, pollTimeout);
+  try {
+    while (running) {
+      try {
+        const updates = await callGetUpdates(botToken, nextOffset, pollTimeout);
 
-      if (updates.length === 0) {
-        await sleep(pollIntervalMs);
-        continue;
-      }
-
-      for (const update of updates) {
-        const updateId = update.update_id;
-        const updateKind = update.message
-          ? "message"
-          : update.edited_message
-            ? "edited_message"
-            : update.callback_query
-              ? "callback_query"
-              : update.inline_query
-                ? "inline_query"
-                : "unknown";
-
-        await appendPollerEventLog("update.received", {
-          updateId: updateId ?? null,
-          updateKind,
-          hasCallbackData: Boolean(update.callback_query?.data),
-          fromChatId:
-            update.message?.chat?.id ??
-            update.edited_message?.chat?.id ??
-            update.callback_query?.message?.chat?.id ??
-            null,
-        });
-
-        if (typeof updateId !== "number" || !Number.isInteger(updateId)) {
+        if (updates.length === 0) {
+          await sleep(pollIntervalMs);
           continue;
         }
 
-        try {
-          await postUpdateToAgent(update, localEndpoint, webhookSecret);
-          nextOffset = Math.max(nextOffset, updateId + 1);
-          await writeOffset(statePath, nextOffset);
-          await appendPollerEventLog("update.posted", {
-            updateId,
-            updateKind,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.error(
-            `[telegram-poller] update ${updateId} processing failed: ${message}`,
-          );
-          await appendPollerEventLog("update.post_failed", {
-            updateId,
-            updateKind,
-            error: message,
-          });
-          await sleep(pollIntervalMs * 2);
-          break;
-        }
+        for (const update of updates) {
+          const updateId = update.update_id;
+          const updateKind = update.message
+            ? "message"
+            : update.edited_message
+              ? "edited_message"
+              : update.callback_query
+                ? "callback_query"
+                : update.inline_query
+                  ? "inline_query"
+                  : "unknown";
 
+          await appendPollerEventLog("update.received", {
+            updateId: updateId ?? null,
+            updateKind,
+            hasCallbackData: Boolean(update.callback_query?.data),
+            fromChatId:
+              update.message?.chat?.id ??
+              update.edited_message?.chat?.id ??
+              update.callback_query?.message?.chat?.id ??
+              null,
+          });
+
+          if (typeof updateId !== "number" || !Number.isInteger(updateId)) {
+            continue;
+          }
+
+          try {
+            await postUpdateToAgent(update, localEndpoint, webhookSecret);
+            nextOffset = Math.max(nextOffset, updateId + 1);
+            await writeOffset(statePath, nextOffset);
+            await appendPollerEventLog("update.posted", {
+              updateId,
+              updateKind,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(
+              `[telegram-poller] update ${updateId} processing failed: ${message}`,
+            );
+            await appendPollerEventLog("update.post_failed", {
+              updateId,
+              updateKind,
+              error: message,
+            });
+            await sleep(pollIntervalMs * 2);
+            break;
+          }
+
+          if (!running) {
+            break;
+          }
+        }
+      } catch (error) {
         if (!running) {
           break;
         }
+        const message = error instanceof Error ? error.message : String(error);
+        if (isGetUpdatesConflictMessage(message)) {
+          await appendPollerEventLog("polling.conflict_detected", { error: message });
+          console.error(
+            "[telegram-poller] another bot instance is already polling this token; stopping local poller.",
+          );
+          process.exitCode = TELEGRAM_POLLER_CONFLICT_EXIT_CODE;
+          break;
+        }
+        console.error(`[telegram-poller] polling failed: ${message}`);
+        await sleep(pollIntervalMs * 2);
       }
-    } catch (error) {
-      if (!running) {
-        break;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`[telegram-poller] polling failed: ${message}`);
-      await sleep(pollIntervalMs * 2);
     }
-  }
-
-  if (stopped) {
-    await writeOffset(statePath, nextOffset);
-    console.log("[telegram-poller] stopped.");
+  } finally {
+    if (stopped) {
+      await writeOffset(statePath, nextOffset);
+      console.log("[telegram-poller] stopped.");
+    }
+    await lockHandle.release();
   }
 }
 

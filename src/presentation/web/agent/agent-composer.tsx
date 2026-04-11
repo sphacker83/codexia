@@ -187,7 +187,7 @@ export function AgentComposer({ viewModel }: { viewModel: AgentChatViewModel }) 
             title={
               supportsReasoningEffort
                 ? undefined
-                : "Gemini CLI does not support reasoning-effort overrides."
+                : "현재 모델은 사고수준 override를 지원하지 않습니다."
             }
             className="rounded-md border border-[var(--theme-border)] bg-[var(--theme-surface-soft)] px-2 py-1 text-xs text-[var(--theme-fg)] outline-none focus:border-2 focus:border-[var(--theme-accent)] focus:ring-0 disabled:opacity-60"
           >

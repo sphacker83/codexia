@@ -1,13 +1,16 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import { getModelProvider, type ModelProvider } from "@/src/core/agent/models";
 import type { Message, Role, Session, SessionSummary } from "@/src/core/agent/types";
+import { writeTextFileAtomically } from "@/src/infrastructure/atomic-file";
 
 const SESSION_FILE_EXTENSION = ".json";
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const SESSIONS_DIRECTORY = path.join(process.cwd(), "data", "sessions");
 const SESSION_SUMMARY_PREVIEW_LIMIT = 60;
 const SESSION_AUTO_TITLE_PREVIEW_LIMIT = 48;
+const sessionOperationQueues = new Map<string, Promise<void>>();
 
 function assertValidSessionId(sessionId: string): void {
   if (!SESSION_ID_PATTERN.test(sessionId)) {
@@ -23,6 +26,14 @@ function normalizeSession(sessionId: string, raw: Session): Session {
   const baseCreatedAt = raw.createdAt || new Date().toISOString();
   const lastMessageTime = raw.messages.at(-1)?.createdAt;
   const updatedAt = raw.updatedAt || lastMessageTime || baseCreatedAt;
+  const providerSessionId =
+    typeof raw.providerSessionId === "string" && raw.providerSessionId.trim()
+      ? raw.providerSessionId.trim()
+      : undefined;
+  const providerSessionProvider =
+    raw.providerSessionProvider === "codex" || raw.providerSessionProvider === "gemini"
+      ? raw.providerSessionProvider
+      : undefined;
 
   return {
     sessionId,
@@ -31,8 +42,28 @@ function normalizeSession(sessionId: string, raw: Session): Session {
     title: raw.title,
     model: raw.model,
     reasoningEffort: raw.reasoningEffort,
+    providerSessionId,
+    providerSessionProvider,
     activeJobId: raw.activeJobId,
     messages: Array.isArray(raw.messages) ? raw.messages : [],
+  };
+}
+
+function normalizeProviderSessionState(
+  session: Session,
+  model: string,
+): Pick<Session, "providerSessionId" | "providerSessionProvider"> {
+  const nextProvider = getModelProvider(model);
+  if (session.providerSessionProvider && session.providerSessionProvider !== nextProvider) {
+    return {
+      providerSessionId: undefined,
+      providerSessionProvider: undefined,
+    };
+  }
+
+  return {
+    providerSessionId: session.providerSessionId,
+    providerSessionProvider: session.providerSessionProvider,
   };
 }
 
@@ -81,6 +112,39 @@ function createEmptySession(sessionId: string): Session {
   };
 }
 
+async function enqueueSessionOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+  const pending = sessionOperationQueues.get(sessionId) ?? Promise.resolve();
+  let releaseCurrentOperation!: () => void;
+  const currentOperation = new Promise<void>((resolve) => {
+    releaseCurrentOperation = resolve;
+  });
+  const nextOperation = pending.catch(() => undefined).then(() => currentOperation);
+
+  sessionOperationQueues.set(sessionId, nextOperation);
+  await pending.catch(() => undefined);
+
+  try {
+    return await operation();
+  } finally {
+    releaseCurrentOperation();
+    if (sessionOperationQueues.get(sessionId) === nextOperation) {
+      sessionOperationQueues.delete(sessionId);
+    }
+  }
+}
+
+async function updateSession(
+  sessionId: string,
+  updater: (session: Session) => Promise<Session> | Session,
+): Promise<Session> {
+  return enqueueSessionOperation(sessionId, async () => {
+    const currentSession = (await readSessionFile(sessionId)) ?? createEmptySession(sessionId);
+    const nextSession = normalizeSession(sessionId, await updater(currentSession));
+    await writeSessionFile(sessionId, nextSession);
+    return nextSession;
+  });
+}
+
 export async function readSessionFile(sessionId: string): Promise<Session | null> {
   const filePath = getSessionFilePath(sessionId);
 
@@ -94,7 +158,7 @@ export async function readSessionFile(sessionId: string): Promise<Session | null
     }
 
     if (error instanceof SyntaxError) {
-      throw new Error(`Failed to parse session file: ${filePath}`);
+      throw new Error(`Failed to parse session file: ${filePath}`, { cause: error });
     }
 
     throw error;
@@ -106,15 +170,12 @@ export async function writeSessionFile(sessionId: string, session: Session): Pro
   const normalized = normalizeSession(sessionId, session);
   const payload = `${JSON.stringify(normalized, null, 2)}\n`;
 
-  await fs.mkdir(SESSIONS_DIRECTORY, { recursive: true });
-  await fs.writeFile(filePath, payload, "utf8");
+  await writeTextFileAtomically(filePath, payload);
 }
 
 export async function createSession(sessionId: string): Promise<Session> {
   assertValidSessionId(sessionId);
-  const session = createEmptySession(sessionId);
-  await writeSessionFile(sessionId, session);
-  return session;
+  return loadSession(sessionId);
 }
 
 interface SetSessionTitleOptions {
@@ -151,25 +212,29 @@ export async function loadExistingSession(sessionId: string): Promise<Session | 
 export async function loadSession(sessionId: string): Promise<Session> {
   assertValidSessionId(sessionId);
   const existing = await readSessionFile(sessionId);
-
   if (existing) {
     return existing;
   }
 
-  return createSession(sessionId);
+  return enqueueSessionOperation(sessionId, async () => {
+    const reloaded = await readSessionFile(sessionId);
+    if (reloaded) {
+      return reloaded;
+    }
+
+    const session = createEmptySession(sessionId);
+    await writeSessionFile(sessionId, session);
+    return session;
+  });
 }
 
 export async function appendMessage(sessionId: string, message: Message): Promise<Session> {
   assertValidSessionId(sessionId);
-  const session = await loadSession(sessionId);
-  const nextSession: Session = {
+  return updateSession(sessionId, async (session) => ({
     ...session,
     updatedAt: message.createdAt || new Date().toISOString(),
     messages: [...session.messages, message],
-  };
-
-  await writeSessionFile(sessionId, nextSession);
-  return nextSession;
+  }));
 }
 
 export async function setSessionModel(
@@ -178,15 +243,16 @@ export async function setSessionModel(
   reasoningEffort?: string,
 ): Promise<Session> {
   assertValidSessionId(sessionId);
-  const session = await loadSession(sessionId);
-  const nextSession: Session = {
-    ...session,
-    model,
-    reasoningEffort,
-    updatedAt: new Date().toISOString(),
-  };
-  await writeSessionFile(sessionId, nextSession);
-  return nextSession;
+  return updateSession(sessionId, async (session) => {
+    const providerSessionState = normalizeProviderSessionState(session, model);
+    return {
+      ...session,
+      ...providerSessionState,
+      model,
+      reasoningEffort,
+      updatedAt: new Date().toISOString(),
+    };
+  });
 }
 
 export async function setSessionTitle(
@@ -195,46 +261,51 @@ export async function setSessionTitle(
   options?: SetSessionTitleOptions,
 ): Promise<Session> {
   assertValidSessionId(sessionId);
-  const session = await loadSession(sessionId);
   const overwrite = options?.overwrite ?? true;
   const maxLength = options?.maxLength ?? SESSION_AUTO_TITLE_PREVIEW_LIMIT;
-  const normalized = normalizeSessionTitle(title, maxLength);
-  if (!normalized) {
-    throw new Error("Session title is empty.");
-  }
 
-  if (!overwrite && session.title?.trim()) {
-    return session;
-  }
+  return updateSession(sessionId, async (session) => {
+    const normalized = normalizeSessionTitle(title, maxLength);
+    if (!normalized) {
+      throw new Error("Session title is empty.");
+    }
 
-  const nextSession: Session = {
-    ...session,
-    title: normalized,
-    updatedAt: new Date().toISOString(),
-  };
+    if (!overwrite && session.title?.trim()) {
+      return session;
+    }
 
-  await writeSessionFile(sessionId, nextSession);
-  return nextSession;
+    return {
+      ...session,
+      title: normalized,
+      updatedAt: new Date().toISOString(),
+    };
+  });
 }
 
 export async function setSessionTitleIfMissing(sessionId: string, title: string): Promise<boolean> {
   assertValidSessionId(sessionId);
-  const session = await loadSession(sessionId);
-  if (session.title?.trim()) {
-    return false;
-  }
+  let didSetTitle = false;
 
-  const normalized = summarizeSessionTitleFromResponse(title);
-  if (!normalized) {
-    return false;
-  }
+  await updateSession(sessionId, async (session) => {
+    if (session.title?.trim()) {
+      return session;
+    }
 
-  await writeSessionFile(sessionId, {
-    ...session,
-    title: normalized,
-    updatedAt: new Date().toISOString(),
+    const normalized = summarizeSessionTitleFromResponse(title);
+    if (!normalized) {
+      return session;
+    }
+
+    didSetTitle = true;
+
+    return {
+      ...session,
+      title: normalized,
+      updatedAt: new Date().toISOString(),
+    };
   });
-  return true;
+
+  return didSetTitle;
 }
 
 interface RecordUserTurnInput {
@@ -248,29 +319,46 @@ export async function recordUserTurn(
   { model, reasoningEffort, userMessage }: RecordUserTurnInput,
 ): Promise<Session> {
   assertValidSessionId(sessionId);
-  const session = await loadSession(sessionId);
-  const userMessageRecord = createMessage("user", userMessage);
-  const nextSession: Session = {
+  return updateSession(sessionId, async (session) => {
+    const userMessageRecord = createMessage("user", userMessage);
+    const providerSessionState = normalizeProviderSessionState(session, model);
+    return {
+      ...session,
+      ...providerSessionState,
+      model,
+      reasoningEffort,
+      updatedAt: userMessageRecord.createdAt,
+      messages: [...session.messages, userMessageRecord],
+    };
+  });
+}
+
+export async function setSessionProviderSession(
+  sessionId: string,
+  provider: ModelProvider,
+  providerSessionId: string,
+): Promise<Session> {
+  assertValidSessionId(sessionId);
+  const normalizedProviderSessionId = providerSessionId.trim();
+  if (!normalizedProviderSessionId) {
+    throw new Error("providerSessionId is empty.");
+  }
+
+  return updateSession(sessionId, async (session) => ({
     ...session,
-    model,
-    reasoningEffort,
-    updatedAt: userMessageRecord.createdAt,
-    messages: [...session.messages, userMessageRecord],
-  };
-  await writeSessionFile(sessionId, nextSession);
-  return nextSession;
+    providerSessionProvider: provider,
+    providerSessionId: normalizedProviderSessionId,
+    updatedAt: new Date().toISOString(),
+  }));
 }
 
 export async function setSessionActiveJob(sessionId: string, jobId?: string): Promise<Session> {
   assertValidSessionId(sessionId);
-  const session = await loadSession(sessionId);
-  const nextSession: Session = {
+  return updateSession(sessionId, async (session) => ({
     ...session,
     activeJobId: jobId,
     updatedAt: new Date().toISOString(),
-  };
-  await writeSessionFile(sessionId, nextSession);
-  return nextSession;
+  }));
 }
 
 export function getSessionLastActivity(session: Session): string {

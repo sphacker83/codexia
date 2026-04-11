@@ -660,6 +660,16 @@ export function useAgentChatViewModel(): AgentChatViewModel {
       return;
     }
 
+    if (forceNewSession && !requestedSessionId) {
+      setMessages([]);
+      setActiveJobId(null);
+      setResponsePhase("idle");
+      setIsLoading(false);
+      setIsLoadingSession(false);
+      stopJobStream();
+      return;
+    }
+
     stopJobStream();
 
     const loadSession = async () => {
@@ -735,7 +745,14 @@ export function useAgentChatViewModel(): AgentChatViewModel {
     };
 
     void loadSession();
-  }, [hasValidSessionId, sessionId, startExistingJobStream, stopJobStream]);
+  }, [
+    forceNewSession,
+    hasValidSessionId,
+    requestedSessionId,
+    sessionId,
+    startExistingJobStream,
+    stopJobStream,
+  ]);
 
   useEffect(() => {
     return () => {

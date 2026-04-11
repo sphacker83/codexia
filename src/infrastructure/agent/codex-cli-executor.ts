@@ -16,10 +16,7 @@ export const DEFAULT_CODEX_TIMEOUT_MS = DEFAULT_CLI_TIMEOUT_MS;
 const isWindows = process.platform === "win32";
 const userHomeDirectory = os.homedir();
 const FIXED_CODEX_BASE_ARGS: readonly string[] = [
-  "exec",
   "--skip-git-repo-check",
-  "--sandbox",
-  "danger-full-access",
 ];
 
 type AgentCliRunnerErrorCode =
@@ -34,6 +31,7 @@ interface BuildCliArgsInput {
   model?: string;
   reasoningEffort?: string;
   jsonOutput?: boolean;
+  sessionId?: string;
 }
 
 interface RunnerConfig {
@@ -72,6 +70,7 @@ export interface RunAgentCliOptions {
   model?: string;
   reasoningEffort?: string;
   jsonOutput?: boolean;
+  sessionId?: string;
 }
 
 export type RunCodexOptions = RunAgentCliOptions;
@@ -206,8 +205,9 @@ function buildCodexArgs({
   model,
   reasoningEffort,
   jsonOutput,
+  sessionId,
 }: BuildCliArgsInput): string[] {
-  const args = [...FIXED_CODEX_BASE_ARGS];
+  const args = sessionId ? ["exec", "resume", ...FIXED_CODEX_BASE_ARGS] : ["exec", ...FIXED_CODEX_BASE_ARGS];
   if (model && model.trim()) {
     args.push("-m", model.trim());
   }
@@ -216,6 +216,12 @@ function buildCodexArgs({
   }
   if (jsonOutput) {
     args.push("--json");
+  }
+  if (!sessionId) {
+    args.push("--sandbox", "danger-full-access");
+  }
+  if (sessionId && sessionId.trim()) {
+    args.push(sessionId.trim());
   }
   args.push("-");
   return args;
@@ -313,6 +319,7 @@ export function runAgentCli({
   model,
   reasoningEffort,
   jsonOutput,
+  sessionId,
 }: RunAgentCliOptions): RunAgentCliResult {
   const resolvedTimeoutMs = resolveAgentCliTimeoutMs(timeoutMs);
   const config = getRunnerConfig(model);
@@ -320,14 +327,14 @@ export function runAgentCli({
   const workspaceRoot = getAgentWorkspaceRoot();
   const child = spawn(
     commandPath,
-    config.buildArgs({ model, reasoningEffort, jsonOutput }),
+    config.buildArgs({ model, reasoningEffort, jsonOutput, sessionId }),
     {
       cwd: workspaceRoot,
       stdio: ["pipe", "pipe", "pipe"],
       shell: isWindows && /\.(cmd|bat)$/i.test(commandPath),
       env: {
         ...process.env,
-        ...(config.buildEnv?.({ model, reasoningEffort, jsonOutput }) ?? {}),
+        ...(config.buildEnv?.({ model, reasoningEffort, jsonOutput, sessionId }) ?? {}),
       },
     },
   );

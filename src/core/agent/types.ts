@@ -1,3 +1,5 @@
+import type { ModelProvider } from "./models";
+
 export type Role = "user" | "assistant";
 
 export interface Message {
@@ -13,6 +15,8 @@ export interface Session {
   title?: string;
   model?: string;
   reasoningEffort?: string;
+  providerSessionId?: string;
+  providerSessionProvider?: ModelProvider;
   activeJobId?: string;
   messages: Message[];
 }

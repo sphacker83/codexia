@@ -39,8 +39,17 @@ export const dynamic = "force-dynamic";
 const TELEGRAM_API_BASE_URL = "https://api.telegram.org/bot";
 const TELEGRAM_CHAT_TEXT_LIMIT = 4096;
 const TELEGRAM_POLL_INTERVAL_MS = 1000;
-const TELEGRAM_PROGRESS_UPDATE_INTERVAL_MS = 1000;
+const TELEGRAM_PROGRESS_UPDATE_INTERVAL_MS = getEnvInt(
+  "TELEGRAM_PROGRESS_UPDATE_INTERVAL_MS",
+  5000,
+);
+const TELEGRAM_EDIT_MESSAGE_MIN_INTERVAL_MS = getEnvInt(
+  "TELEGRAM_EDIT_MESSAGE_MIN_INTERVAL_MS",
+  1500,
+);
 const TELEGRAM_PROGRESS_PREVIEW_LIMIT = getEnvInt("TELEGRAM_PROGRESS_PREVIEW_LIMIT", 320);
+const TELEGRAM_UPDATE_DEDUP_TTL_MS = getEnvInt("TELEGRAM_UPDATE_DEDUP_TTL_MS", 5 * 60 * 1000);
+const TELEGRAM_API_RATE_LIMIT_MAX_RETRIES = getEnvInt("TELEGRAM_API_RATE_LIMIT_MAX_RETRIES", 3);
 const TELEGRAM_DEFAULT_TRACE_MODE = process.env.TELEGRAM_DEFAULT_TRACE_MODE !== "0";
 const TELEGRAM_SCREENSHOT_TEMP_DIR = path.join(process.cwd(), "data", "telegram-screenshots");
 const TELEGRAM_FILE_DOWNLOAD_DIR = path.join(process.cwd(), "data", "telegram-files");
@@ -191,6 +200,7 @@ interface TelegramReplyKeyboardRemove {
 }
 
 interface TelegramUpdate {
+  update_id?: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
@@ -200,6 +210,9 @@ interface TelegramApiResponse<T> {
   ok: boolean;
   result?: T;
   description?: string;
+  parameters?: {
+    retry_after?: number;
+  };
 }
 
 type ParsedTelegramCommand =
@@ -242,6 +255,9 @@ let chatCompletionCursorsLoadPromise: Promise<void> | null = null;
 const chatSignalStyles = new Map<number, SignalRecommendationStyle>();
 let chatSignalStylesLoaded = false;
 let chatSignalStylesLoadPromise: Promise<void> | null = null;
+const processedTelegramUpdates = new Map<number, number>();
+const telegramMessageEditQueues = new Map<string, Promise<void>>();
+const telegramMessageLastEditedAt = new Map<string, number>();
 
 function getTelegramBotToken(): string {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
@@ -249,6 +265,30 @@ function getTelegramBotToken(): string {
     throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
   }
   return token;
+}
+
+function pruneProcessedTelegramUpdates(now = Date.now()): void {
+  for (const [updateId, processedAt] of processedTelegramUpdates.entries()) {
+    if (now - processedAt > TELEGRAM_UPDATE_DEDUP_TTL_MS) {
+      processedTelegramUpdates.delete(updateId);
+    }
+  }
+}
+
+function markTelegramUpdateProcessed(updateId?: number): boolean {
+  if (!Number.isInteger(updateId)) {
+    return false;
+  }
+
+  const now = Date.now();
+  pruneProcessedTelegramUpdates(now);
+
+  if (processedTelegramUpdates.has(updateId)) {
+    return true;
+  }
+
+  processedTelegramUpdates.set(updateId, now);
+  return false;
 }
 
 function getWebhookSecret(): string | null {
@@ -1551,7 +1591,9 @@ function buildStatusText(
   status: string,
   summary: string,
   preview: string | null,
+  options?: { completed?: boolean },
 ): string {
+  void options;
   const lines = [
     `${TELEGRAM_LOOP_EMOJI} 작업상태 : ${formatTelegramLoopStatus(status)} (${elapsedSeconds}초)`,
   ];
@@ -1579,19 +1621,40 @@ function formatStatusText(
 }
 
 async function callTelegramApi<T>(method: string, payload: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`${TELEGRAM_API_BASE_URL}${getTelegramBotToken()}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  for (let attempt = 0; attempt <= TELEGRAM_API_RATE_LIMIT_MAX_RETRIES; attempt += 1) {
+    const response = await fetch(`${TELEGRAM_API_BASE_URL}${getTelegramBotToken()}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
 
-  const parsed = (await response.json().catch(() => null)) as TelegramApiResponse<T> | null;
-  if (!response.ok || !parsed?.ok || !parsed.result) {
+    const parsed = (await response.json().catch(() => null)) as TelegramApiResponse<T> | null;
+    if (response.ok && parsed?.ok && parsed.result) {
+      return parsed.result;
+    }
+
+    const retryAfterSeconds = parsed?.parameters?.retry_after;
+    if (
+      typeof retryAfterSeconds === "number" &&
+      Number.isFinite(retryAfterSeconds) &&
+      retryAfterSeconds > 0 &&
+      attempt < TELEGRAM_API_RATE_LIMIT_MAX_RETRIES
+    ) {
+      await appendTelegramEventLog("telegram_api.rate_limited", {
+        method,
+        retryAfterSeconds,
+        attempt: attempt + 1,
+        chatId: payload.chat_id ?? null,
+        messageId: payload.message_id ?? null,
+      });
+      await sleep(retryAfterSeconds * 1000);
+      continue;
+    }
+
     const message = parsed?.description || `HTTP ${response.status}`;
     throw new Error(`Telegram API error: ${message}`);
   }
-
-  return parsed.result;
+  throw new Error("Telegram API error: exceeded retry limit");
 }
 
 async function downloadTelegramFile(
@@ -1718,14 +1781,59 @@ async function sendTelegramPhoto(
   return parsed.result;
 }
 
+function getTelegramMessageKey(chatId: number, messageId: number): string {
+  return `${chatId}:${messageId}`;
+}
+
+async function runTelegramMessageEditWithThrottle<T>(
+  chatId: number,
+  messageId: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = getTelegramMessageKey(chatId, messageId);
+  const previous = telegramMessageEditQueues.get(key) ?? Promise.resolve();
+
+  const current = previous.catch(() => undefined).then(async () => {
+    const lastEditedAt = telegramMessageLastEditedAt.get(key) ?? 0;
+    const waitMs = TELEGRAM_EDIT_MESSAGE_MIN_INTERVAL_MS - (Date.now() - lastEditedAt);
+    if (waitMs > 0) {
+      await appendTelegramEventLog("telegram_message.edit_throttled", {
+        chatId,
+        messageId,
+        waitMs,
+      });
+      await sleep(waitMs);
+    }
+
+    try {
+      return await operation();
+    } finally {
+      telegramMessageLastEditedAt.set(key, Date.now());
+    }
+  });
+
+  const settled = current.then(() => undefined, () => undefined);
+  telegramMessageEditQueues.set(key, settled);
+
+  try {
+    return await current;
+  } finally {
+    if (telegramMessageEditQueues.get(key) === settled) {
+      telegramMessageEditQueues.delete(key);
+    }
+  }
+}
+
 async function editTelegramMessage(chatId: number, messageId: number, text: string): Promise<void> {
   const safeText = text.slice(0, TELEGRAM_CHAT_TEXT_LIMIT);
   try {
-    await callTelegramApi("editMessageText", {
-      chat_id: chatId,
-      message_id: messageId,
-      text: safeText,
-      disable_web_page_preview: true,
+    await runTelegramMessageEditWithThrottle(chatId, messageId, async () => {
+      await callTelegramApi("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: safeText,
+        disable_web_page_preview: true,
+      });
     });
   } catch (error) {
     if (error instanceof Error && error.message.includes("message is not modified")) {
@@ -2518,6 +2626,20 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const body = (await request.json()) as TelegramUpdate;
+    if (markTelegramUpdateProcessed(body.update_id)) {
+      await appendTelegramEventLog("update.duplicate_skipped", {
+        updateId: body.update_id ?? null,
+        updateType: body.callback_query
+          ? "callback_query"
+          : body.edited_message
+            ? "edited_message"
+            : body.message
+              ? "message"
+              : "unknown",
+      });
+      return Response.json({ ok: true }, { status: 200 });
+    }
+
     const callbackQuery = body.callback_query;
     if (callbackQuery) {
       await appendTelegramEventLog("callback_query.received", {
