@@ -62,6 +62,8 @@ export interface PromptBuildMeta {
   promptLength: number;
 }
 
+export type AgentPromptMode = "provider-resume" | "fresh-start";
+
 export type AgentJobEvent =
   | { id: number; createdAt: string; type: "chunk"; text: string }
   | { id: number; createdAt: string; type: "reasoning"; text: string }
@@ -94,6 +96,7 @@ export interface AgentJob {
   completedAt?: string;
   updatedAt: string;
   assistantText: string;
+  promptMode?: AgentPromptMode;
   error?: string;
   usage?: AgentJobUsage;
   contextMeta?: PromptBuildMeta;
@@ -113,6 +116,7 @@ export interface AgentJobSnapshot {
   completedAt?: string;
   updatedAt: string;
   assistantText: string;
+  promptMode?: AgentPromptMode;
   error?: string;
   usage?: AgentJobUsage;
   contextMeta?: PromptBuildMeta;

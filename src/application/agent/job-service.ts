@@ -782,7 +782,7 @@ type ResolvedJobPrompt = {
   prompt: string;
   contextMeta?: AgentJob["contextMeta"];
   providerSessionId?: string;
-  mode: "provider-resume" | "fresh-start";
+  mode: AgentJob["promptMode"];
 };
 
 function shouldUseCodexProviderResume(job: AgentJob, session: Session): boolean {
@@ -856,6 +856,7 @@ async function runJob(jobId: string): Promise<void> {
     const promptState = resolveJobPrompt(job, session);
     const prompt = promptState.prompt;
     job.contextMeta = promptState.contextMeta;
+    job.promptMode = promptState.mode;
     if (promptState.contextMeta) {
       const meta = promptState.contextMeta;
       console.info(

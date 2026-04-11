@@ -4,7 +4,7 @@ import type { ChangeEventHandler, FormEventHandler, KeyboardEventHandler, RefObj
 
 import type { SupportedModel } from "@/src/core/agent/models";
 import type { SupportedReasoningEffort } from "@/src/core/agent/reasoning";
-import type { PromptBuildMeta } from "@/src/core/agent/types";
+import type { AgentPromptMode, PromptBuildMeta } from "@/src/core/agent/types";
 
 export type ChatRole = "user" | "assistant";
 export type ChatStatus = "streaming" | "done" | "error";
@@ -51,6 +51,7 @@ export interface AgentChatViewModel {
   reasoningLogs: string[];
   activeCommand: string | null;
   activeJobId: string | null;
+  activePromptMode: AgentPromptMode | null;
   messages: ChatMessage[];
   selectedModel: SupportedModel;
   selectedReasoningEffort: SupportedReasoningEffort;

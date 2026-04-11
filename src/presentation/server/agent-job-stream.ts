@@ -31,6 +31,7 @@ export function toAgentJobSnapshot(job: AgentJob): AgentJobSnapshot {
     completedAt: job.completedAt,
     updatedAt: job.updatedAt,
     assistantText: job.assistantText,
+    promptMode: job.promptMode,
     error: job.error,
     usage: job.usage,
     contextMeta: job.contextMeta,

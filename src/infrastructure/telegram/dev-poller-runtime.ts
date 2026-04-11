@@ -190,7 +190,7 @@ function buildPollerLocalEndpoint(port: number): string {
 async function createSharedDevEnv(): Promise<NodeJS.ProcessEnv> {
   const preferredPort = getPreferredDevPort();
   const selectedPort = await resolveAvailablePort(preferredPort);
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     PORT: String(selectedPort),
   };

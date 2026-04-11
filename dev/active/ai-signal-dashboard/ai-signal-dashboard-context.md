@@ -27,6 +27,18 @@
   - `/asset`
   - `/style`
 
+## SESSION NOTE (2026-04-11)
+
+- Telegram help text의 최상단 우선순위를 재정리했다.
+- 도움말 맨 위에서 Signal 관련 명령을 제거하고, 메뉴 버튼 추천 TOP 5를 `/run`, `/status`, `/jobs`, `/session`, `/help` 기준으로 노출한다.
+- 세션 관련 UX는 `/s` 별칭을 추가하고, 사용자가 보게 되는 재개 표기를 `/resume`으로 통일했다.
+- 중복으로 반복되던 `/status`, `/session`, `/help` 설명은 하나만 남기도록 정리했다.
+- 헬프 메시지는 메뉴 10개 목록으로 축약하지 않고, 기존 설명 중심 구조를 유지한 채 상단 추천 블록만 남긴다.
+- `model`과 `effort`는 세션 선택처럼 reply keyboard로 목록 선택이 가능하도록 확장했다.
+- 선택 메뉴는 목록 조회/입력 실패 시 유지되고, 실제 선택이 완료되면 키보드를 제거해 입력창을 원복한다.
+- `model`과 `effort` 버튼 라벨에는 번호만 두지 않고, 실제 선택 대상 이름을 함께 표시해 바로 읽히도록 정리했다.
+- 검증은 `pnpm exec eslint app/api/telegram/route.ts` 로 수행했다.
+
 ### WHAT CHANGED IN THIS SESSION
 
 - PostgreSQL migration 추가

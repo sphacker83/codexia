@@ -21,6 +21,7 @@ import type {
   AgentJobEvent,
   AgentJobSnapshot,
   AgentJobStreamEvent,
+  AgentPromptMode,
   Message,
   Session,
 } from "@/src/core/agent/types";
@@ -183,6 +184,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
   const [reasoningLogs, setReasoningLogs] = useState<string[]>([]);
   const [activeCommand, setActiveCommand] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [activePromptMode, setActivePromptMode] = useState<AgentPromptMode | null>(null);
   const [contextCapacityMeta, setContextCapacityMeta] = useState<ReturnType<typeof computePromptBuildMeta> | null>(null);
   const [traceMode, setTraceMode] = useState(true);
   const [fileSuggestions, setFileSuggestions] = useState<FileSuggestion[]>([]);
@@ -404,6 +406,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
       }
 
       setActiveJobId(job.jobId);
+      setActivePromptMode(job.promptMode ?? null);
 
       if (job.startedAt) {
         const startedAt = Date.parse(job.startedAt);
@@ -464,6 +467,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
 
       setActiveCommand(null);
       setActiveJobId(null);
+      setActivePromptMode(null);
       usageStatsRef.current = null;
       setResponsePhase("idle");
       setIsLoading(false);
@@ -489,6 +493,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
 
       setActiveCommand(null);
       setActiveJobId(null);
+      setActivePromptMode(null);
       usageStatsRef.current = null;
       setResponsePhase("idle");
       setIsLoading(false);
@@ -581,6 +586,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
       };
       setContextCapacityMeta(null);
       setActiveJobId(jobId);
+      setActivePromptMode(null);
       setIsLoading(true);
       setResponsePhase("waiting");
 
@@ -663,6 +669,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
     if (forceNewSession && !requestedSessionId) {
       setMessages([]);
       setActiveJobId(null);
+      setActivePromptMode(null);
       setResponsePhase("idle");
       setIsLoading(false);
       setIsLoadingSession(false);
@@ -730,6 +737,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
           void startExistingJobStream(payload.session.activeJobId, resumeAssistantMessageId, Date.now());
         } else {
           setActiveJobId(null);
+          setActivePromptMode(null);
           setResponsePhase("idle");
           setIsLoading(false);
           stopJobStream();
@@ -737,6 +745,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
       } catch {
         setMessages([]);
         setActiveJobId(null);
+        setActivePromptMode(null);
         setResponsePhase("idle");
         setIsLoading(false);
       } finally {
@@ -1128,6 +1137,7 @@ export function useAgentChatViewModel(): AgentChatViewModel {
     reasoningLogs,
     activeCommand,
     activeJobId,
+    activePromptMode,
     messages,
     selectedModel: normalizedSelectedModel,
     selectedReasoningEffort: normalizedReasoningEffort,

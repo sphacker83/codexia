@@ -111,6 +111,8 @@
 - [ ] `/signals` UI에 보조지표 블록 추가
 - [ ] `/signals/[ticker]` UI에 component drilldown 추가
 - [ ] Telegram overview/briefing/recommend parity 확인
+- [x] Telegram help 상단 우선순위를 세션 제어 중심으로 재정리하고 Signal 명령을 제거, `/s` 별칭과 `/resume` 표기 통일을 반영
+- [x] Telegram `model` / `effort` 명령에 세션형 reply keyboard 선택 메뉴를 추가
 
 ## Phase 8. Scheduling and Alerting
 

@@ -20,6 +20,16 @@ function getResponseStatusLabel(phase: AgentChatViewModel["responsePhase"]): str
   return phase === "waiting" ? "요청 대기 중" : "답변 생성 중";
 }
 
+function getPromptModeLabel(promptMode: AgentChatViewModel["activePromptMode"]): string | null {
+  if (promptMode === "provider-resume") {
+    return "resume";
+  }
+  if (promptMode === "fresh-start") {
+    return "fresh-start";
+  }
+  return null;
+}
+
 function formatSuggestionLabel(filePath: string, query: string): string {
   if (!query) {
     return filePath;
@@ -51,6 +61,7 @@ export function AgentComposer({ viewModel }: { viewModel: AgentChatViewModel }) 
     activeCommand,
     reasoningLogs,
     activeJobId,
+    activePromptMode,
     selectedModel,
     selectedReasoningEffort,
     traceMode,
@@ -75,6 +86,7 @@ export function AgentComposer({ viewModel }: { viewModel: AgentChatViewModel }) 
 
   const isSendDisabled = !hasValidSessionId || isLoading || inputLength === 0;
   const supportsReasoningEffort = modelSupportsReasoningEffort(selectedModel);
+  const promptModeLabel = getPromptModeLabel(activePromptMode);
 
   return (
     <form className={`mt-3 shrink-0 bg-transparent ${INPUT_PANEL_WIDTH_CLASS}`} onSubmit={handleSubmit}>
@@ -227,6 +239,7 @@ export function AgentComposer({ viewModel }: { viewModel: AgentChatViewModel }) 
           <span className="animate-pulse">
             {getResponseStatusLabel(responsePhase)} ({waitingSeconds}s)
             {activeJobId ? ` · ${activeJobId}` : ""}
+            {promptModeLabel ? ` · ${promptModeLabel}` : ""}
           </span>
         ) : null}
       </div>

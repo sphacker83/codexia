@@ -276,18 +276,20 @@ function pruneProcessedTelegramUpdates(now = Date.now()): void {
 }
 
 function markTelegramUpdateProcessed(updateId?: number): boolean {
-  if (!Number.isInteger(updateId)) {
+  const normalizedUpdateId =
+    typeof updateId === "number" && Number.isInteger(updateId) ? updateId : null;
+  if (normalizedUpdateId === null) {
     return false;
   }
 
   const now = Date.now();
   pruneProcessedTelegramUpdates(now);
 
-  if (processedTelegramUpdates.has(updateId)) {
+  if (processedTelegramUpdates.has(normalizedUpdateId)) {
     return true;
   }
 
-  processedTelegramUpdates.set(updateId, now);
+  processedTelegramUpdates.set(normalizedUpdateId, now);
   return false;
 }
 
@@ -654,14 +656,14 @@ function formatModelListText(currentModel: string): string {
   const rows = SUPPORTED_MODELS.map((model, index) => {
     const prefix = index + 1;
     const mark = model === currentModel ? " [현재]" : "";
-    return `${prefix}. ${getModelLabel(model)} (${model})${mark}`;
+    return `${prefix}. ${getModelLabel(model)} · ${model}${mark}`;
   });
 
   return [
     "모델 목록:",
     ...rows,
-    `현재 모델: ${getModelLabel(currentModel)} (${currentModel})`,
-    "선택: `/model 2` 또는 `/model gpt-5.3-codex`",
+    `현재 모델: ${getModelLabel(currentModel)} · ${currentModel}`,
+    "선택: 버튼을 누르거나 `/model 2`, `/model gpt-5.3-codex`처럼 입력",
   ].join("\n");
 }
 
@@ -669,14 +671,14 @@ function formatReasoningListText(currentReasoning: string): string {
   const rows = SUPPORTED_REASONING_EFFORTS.map((reasoning, index) => {
     const prefix = index + 1;
     const mark = reasoning === currentReasoning ? " [현재]" : "";
-    return `${prefix}. ${formatReasoningLabel(reasoning)} (${reasoning})${mark}`;
+    return `${prefix}. ${formatReasoningLabel(reasoning)} · ${reasoning}${mark}`;
   });
 
   return [
     "사고수준 목록:",
     ...rows,
-    `현재 사고수준: ${formatReasoningLabel(currentReasoning)} (${currentReasoning})`,
-    "선택: `/effort 2` 또는 `/effort high`",
+    `현재 사고수준: ${formatReasoningLabel(currentReasoning)} · ${currentReasoning}`,
+    "선택: 버튼을 누르거나 `/effort 2`, `/effort high`처럼 입력",
   ].join("\n");
 }
 
@@ -1370,6 +1372,7 @@ function parseCommand(input: string): ParsedTelegramCommand {
       return { kind: "start", code: arg || undefined };
     case "status":
       return { kind: "status" };
+    case "s":
     case "session":
     case "settings":
       return { kind: "sessionInfo" };
@@ -1408,7 +1411,8 @@ function parseCommand(input: string): ParsedTelegramCommand {
       if (!arg) {
         return {
           kind: "unknown",
-          message: "`/r <번호|세션ID>` 형식으로 입력해 주세요. (예: /r 2, /r tg_12345_abc...)",
+          message:
+            "`/resume <번호|세션ID>` 형식으로 입력해 주세요. (예: /resume 2, /resume tg_12345_abc...)",
         };
       }
       return { kind: "resumeSession", selector: arg };
@@ -1478,7 +1482,7 @@ function buildSessionResumeReplyKeyboard(
     const displayLabel = rawLabel.length > TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT
       ? `${rawLabel.slice(0, TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT)}...`
       : rawLabel;
-    const commandPrefix = isCurrent ? `/r ${index + 1} [현재]` : `/r ${index + 1}`;
+    const commandPrefix = isCurrent ? `/resume ${index + 1} [현재]` : `/resume ${index + 1}`;
     const safePrefix = `${commandPrefix} `;
     const maxLabelLength = Math.max(1, 64 - safePrefix.length - 3);
     const safeLabel = displayLabel.length > maxLabelLength
@@ -1497,19 +1501,54 @@ function buildSessionResumeReplyKeyboard(
   };
 }
 
+function buildCommandSelectionReplyKeyboard(
+  options: Array<{ commandText: string }>,
+  placeholder: string,
+): TelegramReplyKeyboardMarkup {
+  const keyboard = options.map((option) => [{ text: option.commandText }]);
+  return {
+    keyboard,
+    resize_keyboard: true,
+    one_time_keyboard: true,
+    input_field_placeholder: placeholder,
+  };
+}
+
+function buildModelReplyKeyboard(currentModel: string): TelegramReplyKeyboardMarkup {
+  return buildCommandSelectionReplyKeyboard(
+    SUPPORTED_MODELS.map((model, index) => {
+      const mark = model === currentModel ? " [현재]" : "";
+      return {
+        commandText: `/model ${index + 1} · ${getModelLabel(model)}${mark}`,
+      };
+    }),
+    "버튼으로 모델을 선택하세요",
+  );
+}
+
+function buildReasoningReplyKeyboard(currentReasoning: string): TelegramReplyKeyboardMarkup {
+  return buildCommandSelectionReplyKeyboard(
+    SUPPORTED_REASONING_EFFORTS.map((reasoning, index) => {
+      const mark = reasoning === currentReasoning ? " [현재]" : "";
+      return {
+        commandText: `/effort ${index + 1} · ${formatReasoningLabel(reasoning)}${mark}`,
+      };
+    }),
+    "버튼으로 사고수준을 선택하세요",
+  );
+}
+
 function formatHelpText(): string {
   const base = [
     "명령어 안내:",
-    "- /signal: 현재 SPY/QQQ 시그널 요약",
-    "- /briefing: 시장 브리핑과 핵심 bullet",
-    `- /recommend [개수]: 스타일 기준 추천 종목 조회 (기본 ${SIGNAL_RECOMMENDATION_DEFAULT_LIMIT}개)`,
-    "- /asset <티커>: 개별 종목 상세 요약",
-    "- `/style [conservative|balanced|aggressive]`: 추천 스타일 조회/변경",
-    "- /run <요청>: Codex에 바로 전달합니다.",
-    "- `/run` 없이 텍스트만 보내도 실행됩니다.",
+    "메뉴 버튼 추천 TOP 5:",
+    "- /run <요청>: Codex에 바로 작업 전달",
     "- /status: 현재 세션 상태 확인",
+    "- `/jobs [개수]`: 최근 작업 목록 빠르게 확인",
+    "- /s 또는 /session: 세션 목록 조회 및 전환",
+    "- /h 또는 /help: 전체 도움말 다시 보기",
+    "- `/run` 없이 텍스트만 보내도 실행됩니다.",
     "- /c 또는 /cancel: 진행 중인 작업 취소",
-    "- `/jobs [개수]`: 최근 작업 목록 조회 (기본 10개)",
     "- /sc 또는 /screencap [라벨]: 내 화면 캡처 후 이미지 전송",
     "- /n 또는 /new: 새 세션으로 강제 전환",
     "- /t 또는 /title <제목>: 현재 세션 제목 설정 (예: /title 버그 수정)",
@@ -1517,9 +1556,8 @@ function formatHelpText(): string {
     "- `/m <번호|모델명>`, `/model <번호|모델명>`: 기본 모델 변경",
     "- `/e`, `/effort`: 사고수준 목록 조회",
     "- `/e <번호|사고수준>`, `/effort <번호|사고수준>`: 사고수준 변경",
-    "- /session: 현재 세션/목록 조회 (버튼 클릭으로 세션 전환 가능)",
     "- `/recent [개수]`: 최근 대화 미리보기 (기본 6개)",
-    "- /r <번호|세션ID>: 기존 세션으로 전환",
+    "- /resume <번호|세션ID>: 기존 세션으로 전환",
     "- /log [개수]: 최근 이벤트 로그 조회 (기본 40줄)",
     "- /clear: 대화 기록 초기화",
     "- /ping: 연결 테스트",
@@ -1529,7 +1567,6 @@ function formatHelpText(): string {
   if (TELEGRAM_REGISTRATION_CODE) {
     base.push("- /start <인증코드>: 인증 코드로 사용 승인");
   }
-  base.push("- /h 또는 /help: 이 도움말 표시");
 
   return base.join("\n");
 }
@@ -2049,29 +2086,37 @@ async function handleModelCommand(
   const currentModel = getSessionModel(session.model);
 
   if (!value) {
-    await sendTelegramMessage(chatId, formatModelListText(currentModel));
+    await sendTelegramMessageWithReplyKeyboard(
+      chatId,
+      formatModelListText(currentModel),
+      buildModelReplyKeyboard(currentModel),
+    );
     return;
   }
 
   const nextModel = resolveModelByInput(value);
   if (!nextModel) {
-    await sendTelegramMessage(
+    await sendTelegramMessageWithReplyKeyboard(
       chatId,
       [
         `모델 선택에 실패했습니다: ${value}`,
         formatModelListText(currentModel),
       ].join("\n"),
+      buildModelReplyKeyboard(currentModel),
     );
     return;
   }
 
   if (nextModel === currentModel) {
-    await sendTelegramMessage(chatId, `현재 모델이 이미 ${getModelLabel(nextModel)}입니다.`);
+    await sendTelegramMessageWithRemovedKeyboard(
+      chatId,
+      `현재 모델이 이미 ${getModelLabel(nextModel)}입니다.`,
+    );
     return;
   }
 
   await setSessionModel(sessionId, nextModel, session.reasoningEffort);
-  await sendTelegramMessage(
+  await sendTelegramMessageWithRemovedKeyboard(
     chatId,
     `기본 모델을 ${getModelLabel(nextModel)} (${nextModel})로 변경했습니다.`,
   );
@@ -2086,29 +2131,37 @@ async function handleReasoningCommand(
   const currentReasoning = getSessionReasoning(session.reasoningEffort);
 
   if (!value) {
-    await sendTelegramMessage(chatId, formatReasoningListText(currentReasoning));
+    await sendTelegramMessageWithReplyKeyboard(
+      chatId,
+      formatReasoningListText(currentReasoning),
+      buildReasoningReplyKeyboard(currentReasoning),
+    );
     return;
   }
 
   const nextReasoning = resolveReasoningByInput(value);
   if (!nextReasoning) {
-    await sendTelegramMessage(
+    await sendTelegramMessageWithReplyKeyboard(
       chatId,
       [
         `사고수준 선택에 실패했습니다: ${value}`,
         formatReasoningListText(currentReasoning),
       ].join("\n"),
+      buildReasoningReplyKeyboard(currentReasoning),
     );
     return;
   }
 
   if (nextReasoning === currentReasoning) {
-    await sendTelegramMessage(chatId, `현재 사고수준이 이미 ${formatReasoningLabel(nextReasoning)}입니다.`);
+    await sendTelegramMessageWithRemovedKeyboard(
+      chatId,
+      `현재 사고수준이 이미 ${formatReasoningLabel(nextReasoning)}입니다.`,
+    );
     return;
   }
 
   await setSessionModel(sessionId, getSessionModel(session.model), nextReasoning);
-  await sendTelegramMessage(
+  await sendTelegramMessageWithRemovedKeyboard(
     chatId,
     `사고수준을 ${formatReasoningLabel(nextReasoning)} (${nextReasoning})로 변경했습니다.`,
   );
@@ -2138,7 +2191,7 @@ async function handleSessionInfoCommand(chatId: number, sessionId: string): Prom
     "",
     selectionHelp,
     "",
-    "번호를 탭하면 즉시 전환됩니다. (/r 1 형태로 즉시 실행)",
+    "번호를 탭하면 즉시 전환됩니다. (/resume 1 형태로 즉시 실행)",
     ...targets.map((item, index) => {
       const rawLabel = item.title?.trim() || item.lastMessagePreview?.trim() || "대화 없음";
       const clippedLabel = rawLabel.length > TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT
