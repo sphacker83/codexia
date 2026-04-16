@@ -37,6 +37,8 @@
 - `model`과 `effort`는 세션 선택처럼 reply keyboard로 목록 선택이 가능하도록 확장했다.
 - 선택 메뉴는 목록 조회/입력 실패 시 유지되고, 실제 선택이 완료되면 키보드를 제거해 입력창을 원복한다.
 - `model`과 `effort` 버튼 라벨에는 번호만 두지 않고, 실제 선택 대상 이름을 함께 표시해 바로 읽히도록 정리했다.
+- 앱 내부 Codex 실행기는 `cdx` alias와 같은 효과가 나도록 `--dangerously-bypass-approvals-and-sandbox` 기본 인자를 사용하게 맞췄다.
+- 앱 내부 Codex 실행기는 spawn env에서 `CODEX_SANDBOX_NETWORK_DISABLED=0`을 명시해 부모 프로세스의 네트워크 차단 플래그를 덮어쓰도록 조정했다.
 - 검증은 `pnpm exec eslint app/api/telegram/route.ts` 로 수행했다.
 
 ### WHAT CHANGED IN THIS SESSION

@@ -32,7 +32,27 @@ interface TelegramApiResponse<T> {
   description?: string;
 }
 
+interface TelegramBotCommand {
+  command: string;
+  description: string;
+}
+
+type TelegramBotCommandScope =
+  | { type: "default" }
+  | { type: "all_private_chats" };
+
 const TELEGRAM_POLLER_CONFLICT_EXIT_CODE = 20;
+const TELEGRAM_MENU_COMMANDS: TelegramBotCommand[] = [
+  { command: "workspace", description: "작업 폴더 선택" },
+  { command: "status", description: "현재 세션 상태 확인" },
+  { command: "jobs", description: "최근 작업 목록 보기" },
+  { command: "session", description: "세션 목록 조회 및 전환" },
+  { command: "cancel", description: "진행 중 작업 취소" },
+  { command: "new", description: "새 세션 시작" },
+  { command: "model", description: "모델 목록 조회 및 변경" },
+  { command: "effort", description: "사고수준 목록 조회 및 변경" },
+  { command: "help", description: "전체 도움말 보기" },
+];
 
 const TELEGRAM_EVENT_LOG_FILE = nodePath.resolve(
   process.cwd(),
@@ -289,6 +309,63 @@ async function callGetUpdates(
   return Array.isArray(body.result) ? body.result : [];
 }
 
+function serializeTelegramCommands(commands: TelegramBotCommand[]): string {
+  return JSON.stringify(
+    commands.map((command) => ({
+      command: command.command.trim(),
+      description: command.description.trim(),
+    })),
+  );
+}
+
+async function getMyCommands(token: string, scope?: TelegramBotCommandScope): Promise<TelegramBotCommand[]> {
+  const response = await fetch(`https://api.telegram.org/bot${token}/getMyCommands`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(scope && scope.type !== "default" ? { scope } : {}),
+  });
+  const body = (await response.json().catch(() => null)) as TelegramApiResponse<TelegramBotCommand[]> | null;
+  if (!response.ok || !body?.ok) {
+    const message = body?.description || `HTTP ${response.status}`;
+    throw new Error(`getMyCommands failed: ${message}`);
+  }
+  return Array.isArray(body.result) ? body.result : [];
+}
+
+async function setMyCommands(
+  token: string,
+  commands: TelegramBotCommand[],
+  scope?: TelegramBotCommandScope,
+): Promise<void> {
+  const response = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(scope && scope.type !== "default" ? { commands, scope } : { commands }),
+  });
+  const body = (await response.json().catch(() => null)) as TelegramApiResponse<boolean> | null;
+  if (!response.ok || !body?.ok) {
+    const message = body?.description || `HTTP ${response.status}`;
+    throw new Error(`setMyCommands failed: ${message}`);
+  }
+}
+
+async function ensureTelegramMenuCommands(token: string, scope?: TelegramBotCommandScope): Promise<void> {
+  const currentCommands = await getMyCommands(token, scope);
+  if (serializeTelegramCommands(currentCommands) === serializeTelegramCommands(TELEGRAM_MENU_COMMANDS)) {
+    await appendPollerEventLog("menu.sync_skipped", {
+      commandCount: TELEGRAM_MENU_COMMANDS.length,
+      scope: scope?.type ?? "default",
+    });
+    return;
+  }
+
+  await setMyCommands(token, TELEGRAM_MENU_COMMANDS, scope);
+  await appendPollerEventLog("menu.synced", {
+    commandCount: TELEGRAM_MENU_COMMANDS.length,
+    scope: scope?.type ?? "default",
+  });
+}
+
 async function postUpdateToAgent(
   update: TelegramUpdate,
   localEndpoint: string,
@@ -343,6 +420,10 @@ async function runTelegramPoller(): Promise<void> {
     console.log("[telegram-poller] deleting Telegram webhook...");
     await deleteWebhook(botToken);
   }
+
+  console.log("[telegram-poller] syncing Telegram menu commands...");
+  await ensureTelegramMenuCommands(botToken);
+  await ensureTelegramMenuCommands(botToken, { type: "all_private_chats" });
 
   let nextOffset = await readOffset(statePath);
   if (nextOffset === 0) {

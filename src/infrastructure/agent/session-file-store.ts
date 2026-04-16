@@ -2,8 +2,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { getModelProvider, type ModelProvider } from "@/src/core/agent/models";
+import { getAgentWorkspaceRoot } from "@/src/core/workspace/policy";
 import type { Message, Role, Session, SessionSummary } from "@/src/core/agent/types";
 import { writeTextFileAtomically } from "@/src/infrastructure/atomic-file";
+import {
+  type CodexResumeSessionSummary,
+  findCodexResumeSession,
+  listCodexResumeSessions,
+} from "@/src/infrastructure/agent/codex-resume-session-index";
 
 const SESSION_FILE_EXTENSION = ".json";
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -11,6 +17,9 @@ const SESSIONS_DIRECTORY = path.join(process.cwd(), "data", "sessions");
 const SESSION_SUMMARY_PREVIEW_LIMIT = 60;
 const SESSION_AUTO_TITLE_PREVIEW_LIMIT = 48;
 const sessionOperationQueues = new Map<string, Promise<void>>();
+type StoredSession = Session & {
+  defaultWorkingDirectory?: string;
+};
 
 function assertValidSessionId(sessionId: string): void {
   if (!SESSION_ID_PATTERN.test(sessionId)) {
@@ -22,7 +31,42 @@ function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error;
 }
 
-function normalizeSession(sessionId: string, raw: Session): Session {
+function isWithinDirectory(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function normalizeSessionWorkingDirectory(raw: unknown): string | undefined {
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const workspaceRoot = getAgentWorkspaceRoot();
+  const resolved = path.isAbsolute(trimmed)
+    ? path.resolve(trimmed)
+    : path.resolve(workspaceRoot, trimmed);
+
+  if (!isWithinDirectory(workspaceRoot, resolved)) {
+    return undefined;
+  }
+
+  const relative = path.relative(workspaceRoot, resolved);
+  return relative ? relative.replaceAll(path.sep, "/") : ".";
+}
+
+function resolveStoredWorkingDirectory(workingDirectory: string): string {
+  const workspaceRoot = getAgentWorkspaceRoot();
+  return workingDirectory === "."
+    ? workspaceRoot
+    : path.resolve(workspaceRoot, workingDirectory);
+}
+
+function normalizeSession(sessionId: string, raw: StoredSession): StoredSession {
   const baseCreatedAt = raw.createdAt || new Date().toISOString();
   const lastMessageTime = raw.messages.at(-1)?.createdAt;
   const updatedAt = raw.updatedAt || lastMessageTime || baseCreatedAt;
@@ -44,15 +88,16 @@ function normalizeSession(sessionId: string, raw: Session): Session {
     reasoningEffort: raw.reasoningEffort,
     providerSessionId,
     providerSessionProvider,
+    defaultWorkingDirectory: normalizeSessionWorkingDirectory(raw.defaultWorkingDirectory),
     activeJobId: raw.activeJobId,
     messages: Array.isArray(raw.messages) ? raw.messages : [],
   };
 }
 
 function normalizeProviderSessionState(
-  session: Session,
+  session: StoredSession,
   model: string,
-): Pick<Session, "providerSessionId" | "providerSessionProvider"> {
+): Pick<StoredSession, "providerSessionId" | "providerSessionProvider"> {
   const nextProvider = getModelProvider(model);
   if (session.providerSessionProvider && session.providerSessionProvider !== nextProvider) {
     return {
@@ -67,7 +112,7 @@ function normalizeProviderSessionState(
   };
 }
 
-function getLastMessagePreview(session: Session): string {
+function getLastMessagePreview(session: StoredSession): string {
   const lastMessage = session.messages.at(-1);
   if (!lastMessage?.content) {
     return "";
@@ -102,12 +147,29 @@ export function createMessage(role: Role, content: string): Message {
   };
 }
 
-function createEmptySession(sessionId: string): Session {
+function createEmptySession(sessionId: string): StoredSession {
   const now = new Date().toISOString();
   return {
     sessionId,
     createdAt: now,
     updatedAt: now,
+    messages: [],
+  };
+}
+
+function createImportedCodexSession(
+  sessionId: string,
+  imported: CodexResumeSessionSummary,
+): StoredSession {
+  const timestamp = imported.updatedAt;
+  return {
+    sessionId,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    title: imported.title,
+    providerSessionProvider: "codex",
+    providerSessionId: sessionId,
+    defaultWorkingDirectory: normalizeSessionWorkingDirectory(imported.workingDirectory),
     messages: [],
   };
 }
@@ -135,8 +197,8 @@ async function enqueueSessionOperation<T>(sessionId: string, operation: () => Pr
 
 async function updateSession(
   sessionId: string,
-  updater: (session: Session) => Promise<Session> | Session,
-): Promise<Session> {
+  updater: (session: StoredSession) => Promise<StoredSession> | StoredSession,
+): Promise<StoredSession> {
   return enqueueSessionOperation(sessionId, async () => {
     const currentSession = (await readSessionFile(sessionId)) ?? createEmptySession(sessionId);
     const nextSession = normalizeSession(sessionId, await updater(currentSession));
@@ -145,12 +207,12 @@ async function updateSession(
   });
 }
 
-export async function readSessionFile(sessionId: string): Promise<Session | null> {
+export async function readSessionFile(sessionId: string): Promise<StoredSession | null> {
   const filePath = getSessionFilePath(sessionId);
 
   try {
     const raw = await fs.readFile(filePath, "utf8");
-    const parsed = JSON.parse(raw) as Session;
+    const parsed = JSON.parse(raw) as StoredSession;
     return normalizeSession(sessionId, parsed);
   } catch (error) {
     if (isErrnoException(error) && error.code === "ENOENT") {
@@ -167,7 +229,7 @@ export async function readSessionFile(sessionId: string): Promise<Session | null
 
 export async function writeSessionFile(sessionId: string, session: Session): Promise<void> {
   const filePath = getSessionFilePath(sessionId);
-  const normalized = normalizeSession(sessionId, session);
+  const normalized = normalizeSession(sessionId, session as StoredSession);
   const payload = `${JSON.stringify(normalized, null, 2)}\n`;
 
   await writeTextFileAtomically(filePath, payload);
@@ -220,6 +282,13 @@ export async function loadSession(sessionId: string): Promise<Session> {
     const reloaded = await readSessionFile(sessionId);
     if (reloaded) {
       return reloaded;
+    }
+
+    const importedCodexSession = await findCodexResumeSession(sessionId);
+    if (importedCodexSession) {
+      const session = createImportedCodexSession(sessionId, importedCodexSession);
+      await writeSessionFile(sessionId, session);
+      return session;
     }
 
     const session = createEmptySession(sessionId);
@@ -352,6 +421,57 @@ export async function setSessionProviderSession(
   }));
 }
 
+export async function setSessionWorkingDirectory(
+  sessionId: string,
+  workingDirectory: string,
+): Promise<Session> {
+  assertValidSessionId(sessionId);
+  const normalizedWorkingDirectory = normalizeSessionWorkingDirectory(workingDirectory);
+  if (!normalizedWorkingDirectory) {
+    throw new Error("작업 디렉터리는 워크스페이스 내부 경로여야 합니다.");
+  }
+
+  const resolved = resolveStoredWorkingDirectory(normalizedWorkingDirectory);
+  let stat;
+  try {
+    stat = await fs.stat(resolved);
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") {
+      throw new Error(`작업 디렉터리를 찾을 수 없습니다: ${normalizedWorkingDirectory}`);
+    }
+    throw error;
+  }
+
+  if (!stat.isDirectory()) {
+    throw new Error(`작업 디렉터리가 폴더가 아닙니다: ${normalizedWorkingDirectory}`);
+  }
+
+  return updateSession(sessionId, async (session) => ({
+    ...session,
+    defaultWorkingDirectory: normalizedWorkingDirectory,
+    updatedAt: new Date().toISOString(),
+  }));
+}
+
+export async function getSessionWorkingDirectory(sessionId: string): Promise<string | undefined> {
+  assertValidSessionId(sessionId);
+  const session = await readSessionFile(sessionId);
+  const workingDirectory = session?.defaultWorkingDirectory;
+  if (!workingDirectory) {
+    return undefined;
+  }
+
+  return resolveStoredWorkingDirectory(workingDirectory);
+}
+
+export async function getSessionWorkingDirectoryLabel(sessionId: string): Promise<string | undefined> {
+  assertValidSessionId(sessionId);
+  const session = await readSessionFile(sessionId);
+  return session?.defaultWorkingDirectory === "."
+    ? "."
+    : session?.defaultWorkingDirectory;
+}
+
 export async function setSessionActiveJob(sessionId: string, jobId?: string): Promise<Session> {
   assertValidSessionId(sessionId);
   return updateSession(sessionId, async (session) => ({
@@ -365,11 +485,14 @@ export function getSessionLastActivity(session: Session): string {
   return session.messages.at(-1)?.createdAt || session.updatedAt || session.createdAt;
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
+export async function listSessions(workingDirectory?: string): Promise<SessionSummary[]> {
   await fs.mkdir(SESSIONS_DIRECTORY, { recursive: true });
   const files = await fs.readdir(SESSIONS_DIRECTORY);
   const sessionFiles = files.filter((file) => file.endsWith(SESSION_FILE_EXTENSION));
   const summaries: SessionSummary[] = [];
+  const normalizedWorkingDirectory = workingDirectory
+    ? normalizeSessionWorkingDirectory(workingDirectory)
+    : undefined;
 
   for (const fileName of sessionFiles) {
     const sessionId = fileName.slice(0, -SESSION_FILE_EXTENSION.length);
@@ -379,6 +502,12 @@ export async function listSessions(): Promise<SessionSummary[]> {
     try {
       const session = await readSessionFile(sessionId);
       if (!session) {
+        continue;
+      }
+      if (
+        normalizedWorkingDirectory &&
+        normalizeSessionWorkingDirectory(session.defaultWorkingDirectory) !== normalizedWorkingDirectory
+      ) {
         continue;
       }
       summaries.push({
@@ -399,6 +528,38 @@ export async function listSessions(): Promise<SessionSummary[]> {
 
   summaries.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   return summaries;
+}
+
+export async function listResumeSessions(workingDirectory?: string): Promise<SessionSummary[]> {
+  const normalizedWorkingDirectory = workingDirectory
+    ? normalizeSessionWorkingDirectory(workingDirectory)
+    : undefined;
+  const [localSessions, codexSessions] = await Promise.all([
+    listSessions(normalizedWorkingDirectory),
+    listCodexResumeSessions(),
+  ]);
+  const localSessionIds = new Set(localSessions.map((session) => session.sessionId));
+  const externalCodexSessions: SessionSummary[] = codexSessions
+    .filter((session) => !localSessionIds.has(session.sessionId))
+    .filter((session) => {
+      if (!normalizedWorkingDirectory) {
+        return true;
+      }
+      return normalizeSessionWorkingDirectory(session.workingDirectory) === normalizedWorkingDirectory;
+    })
+    .map((session) => ({
+      sessionId: session.sessionId,
+      createdAt: session.updatedAt,
+      updatedAt: session.updatedAt,
+      title: session.title,
+      lastMessagePreview: session.conversation,
+      messageCount: 0,
+      model: "gpt-5.3-codex",
+    }));
+
+  return [...localSessions, ...externalCodexSessions].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  );
 }
 
 export async function deleteSession(sessionId: string): Promise<boolean> {

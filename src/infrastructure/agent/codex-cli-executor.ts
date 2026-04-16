@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -16,6 +16,8 @@ export const DEFAULT_CODEX_TIMEOUT_MS = DEFAULT_CLI_TIMEOUT_MS;
 const isWindows = process.platform === "win32";
 const userHomeDirectory = os.homedir();
 const FIXED_CODEX_BASE_ARGS: readonly string[] = [
+  // Match the user's `cdx` alias behavior inside app-managed Codex launches.
+  "--dangerously-bypass-approvals-and-sandbox",
   "--skip-git-repo-check",
 ];
 
@@ -71,6 +73,7 @@ export interface RunAgentCliOptions {
   reasoningEffort?: string;
   jsonOutput?: boolean;
   sessionId?: string;
+  workingDirectory?: string;
 }
 
 export type RunCodexOptions = RunAgentCliOptions;
@@ -246,6 +249,9 @@ const RUNNER_CONFIGS: Record<ModelProvider, RunnerConfig> = {
     envKeys: ["CODEX_CLI_PATH", "CODEX_PATH"],
     legacyFixedPaths: getDefaultCommandFallbacks("codex"),
     buildArgs: buildCodexArgs,
+    buildEnv: () => ({
+      CODEX_SANDBOX_NETWORK_DISABLED: "0",
+    }),
   },
   gemini: {
     runner: "gemini",
@@ -320,16 +326,46 @@ export function runAgentCli({
   reasoningEffort,
   jsonOutput,
   sessionId,
+  workingDirectory,
 }: RunAgentCliOptions): RunAgentCliResult {
   const resolvedTimeoutMs = resolveAgentCliTimeoutMs(timeoutMs);
   const config = getRunnerConfig(model);
   const commandPath = resolveRunnerCommandPath(config);
   const workspaceRoot = getAgentWorkspaceRoot();
+  const resolvedWorkingDirectory = (() => {
+    if (!workingDirectory?.trim()) {
+      return workspaceRoot;
+    }
+
+    const candidate = path.isAbsolute(workingDirectory)
+      ? path.resolve(workingDirectory)
+      : path.resolve(workspaceRoot, workingDirectory);
+    const relative = path.relative(workspaceRoot, candidate);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new AgentCliRunnerError(
+        config.runner,
+        "SPAWN_FAILED",
+        `Working directory must stay within workspace root: ${workingDirectory}`,
+      );
+    }
+
+    const stat = statSync(candidate, { throwIfNoEntry: false });
+    if (!stat || !stat.isDirectory()) {
+      throw new AgentCliRunnerError(
+        config.runner,
+        "SPAWN_FAILED",
+        `Working directory does not exist: ${workingDirectory}`,
+      );
+    }
+
+    return candidate;
+  })();
+
   const child = spawn(
     commandPath,
     config.buildArgs({ model, reasoningEffort, jsonOutput, sessionId }),
     {
-      cwd: workspaceRoot,
+      cwd: resolvedWorkingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       shell: isWindows && /\.(cmd|bat)$/i.test(commandPath),
       env: {

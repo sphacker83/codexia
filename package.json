@@ -8,6 +8,7 @@
     "build": "node --experimental-strip-types src/infrastructure/web/next-runtime.ts build",
     "start": "next start",
     "lint": "eslint",
+    "discord:commands": "node --experimental-strip-types src/infrastructure/discord/command-sync-runtime.ts",
     "signals:db:up": "docker compose up -d postgres",
     "signals:db:tools": "docker compose --profile tools up -d postgres adminer",
     "signals:db:down": "docker compose down",

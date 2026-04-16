@@ -7,9 +7,11 @@ import {
   listSessionJobs,
 } from "@/src/application/agent/job-service";
 import {
-  listSessions,
+  getSessionWorkingDirectoryLabel,
+  listResumeSessions,
   loadSession,
   setSessionModel,
+  setSessionWorkingDirectory,
   setSessionTitle,
   writeSessionFile,
 } from "@/src/infrastructure/agent/session-file-store";
@@ -28,6 +30,7 @@ import {
   isSupportedReasoningEffort,
   type SupportedReasoningEffort,
 } from "@/src/core/agent/reasoning";
+import { getAgentWorkspaceRoot } from "@/src/core/workspace/policy";
 import type { AgentJob, Message } from "@/src/core/agent/types";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -65,6 +68,10 @@ const TELEGRAM_SESSION_OVERRIDES_FILE = path.resolve(
   process.cwd(),
   process.env.TELEGRAM_SESSION_OVERRIDES_FILE?.trim() || "data/telegram-session-overrides.json",
 );
+const TELEGRAM_WORKSPACE_SELECTION_FILE = path.resolve(
+  process.cwd(),
+  process.env.TELEGRAM_WORKSPACE_SELECTION_FILE?.trim() || "data/telegram-workspace-selection.json",
+);
 const TELEGRAM_COMPLETION_CURSOR_FILE = path.resolve(
   process.cwd(),
   process.env.TELEGRAM_COMPLETION_CURSOR_FILE?.trim() || "data/telegram-completion-cursors.json",
@@ -87,6 +94,7 @@ const TELEGRAM_SESSION_PREVIEW_TEXT_LIMIT = 180;
 const TELEGRAM_SESSION_LIST_LIMIT = 10;
 const TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT = 48;
 const TELEGRAM_SESSION_RESUME_CALLBACK_PREFIX = "resume_session:";
+const TELEGRAM_WORKSPACE_SELECTION_CALLBACK_PREFIX = "workspace_select:";
 const TELEGRAM_SESSION_ID_PREFIX = "tg_";
 const TELEGRAM_REASONING_LABELS: Record<string, string> = {
   minimal: "최소",
@@ -105,6 +113,17 @@ const SIGNAL_DEFAULT_STYLE = "conservative";
 const SIGNAL_RECOMMENDATION_DEFAULT_LIMIT = 5;
 const SIGNAL_RECOMMENDATION_MAX_LIMIT = 10;
 const SIGNAL_DISCLOSURE_TEXT = "판단 보조용이며 자동매매/투자자문이 아닙니다.";
+const TELEGRAM_MENU_COMMANDS = [
+  { command: "workspace", description: "작업 폴더 선택" },
+  { command: "status", description: "현재 세션 상태 확인" },
+  { command: "jobs", description: "최근 작업 목록 보기" },
+  { command: "session", description: "세션 목록 조회 및 전환" },
+  { command: "cancel", description: "진행 중 작업 취소" },
+  { command: "new", description: "새 세션 시작" },
+  { command: "model", description: "모델 목록 조회 및 변경" },
+  { command: "effort", description: "사고수준 목록 조회 및 변경" },
+  { command: "help", description: "전체 도움말 보기" },
+] as const satisfies TelegramBotCommand[];
 
 function getEnvInt(name: string, defaultValue: number): number {
   const raw = process.env[name]?.trim();
@@ -199,6 +218,15 @@ interface TelegramReplyKeyboardRemove {
   selective?: boolean;
 }
 
+interface TelegramInlineKeyboardButton {
+  text: string;
+  callback_data: string;
+}
+
+interface TelegramInlineKeyboardMarkup {
+  inline_keyboard: TelegramInlineKeyboardButton[][];
+}
+
 interface TelegramUpdate {
   update_id?: number;
   message?: TelegramMessage;
@@ -215,6 +243,16 @@ interface TelegramApiResponse<T> {
   };
 }
 
+interface TelegramBotCommand {
+  command: string;
+  description: string;
+}
+
+type TelegramBotCommandScope =
+  | { type: "default" }
+  | { type: "all_private_chats" }
+  | { type: "chat"; chat_id: number };
+
 type ParsedTelegramCommand =
   | { kind: "run"; message: string }
   | { kind: "help" }
@@ -225,13 +263,14 @@ type ParsedTelegramCommand =
   | { kind: "asset"; ticker: string }
   | { kind: "signalStyle"; value?: string }
   | { kind: "newSession" }
+  | { kind: "workspace"; workingDirectory?: string }
   | { kind: "resumeSession"; selector: string }
   | { kind: "status" }
   | { kind: "jobs"; limit: number }
   | { kind: "cancel" }
   | { kind: "model"; value?: string }
   | { kind: "reasoning"; value?: string }
-  | { kind: "sessionInfo" }
+  | { kind: "sessionInfo"; query?: string }
   | { kind: "sessionTitle"; value?: string }
   | { kind: "clear" }
   | { kind: "recent"; count: number }
@@ -245,10 +284,24 @@ interface TelegramSentMessage {
   message_id: number;
 }
 
+interface TelegramSessionBrowseState {
+  query?: string;
+  targetSessionIds: string[];
+  createdAt: number;
+}
+
+interface TelegramWorkspaceBrowseState {
+  directories: string[];
+  createdAt: number;
+}
+
 const chatTraceMode = new Map<string, boolean>();
 const chatSessionOverrides = new Map<number, string>();
 let chatSessionOverridesLoaded = false;
 let chatSessionOverridesLoadPromise: Promise<void> | null = null;
+const chatWorkspaceSelections = new Map<number, string>();
+let chatWorkspaceSelectionsLoaded = false;
+let chatWorkspaceSelectionsLoadPromise: Promise<void> | null = null;
 const chatCompletionCursors = new Map<number, string>();
 let chatCompletionCursorsLoaded = false;
 let chatCompletionCursorsLoadPromise: Promise<void> | null = null;
@@ -258,6 +311,9 @@ let chatSignalStylesLoadPromise: Promise<void> | null = null;
 const processedTelegramUpdates = new Map<number, number>();
 const telegramMessageEditQueues = new Map<string, Promise<void>>();
 const telegramMessageLastEditedAt = new Map<string, number>();
+const telegramMenuSyncState = new Map<string, string>();
+const chatSessionBrowseState = new Map<number, TelegramSessionBrowseState>();
+const chatWorkspaceBrowseState = new Map<number, TelegramWorkspaceBrowseState>();
 
 function getTelegramBotToken(): string {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
@@ -382,6 +438,43 @@ async function ensureChatSessionOverridesLoaded(): Promise<void> {
   await chatSessionOverridesLoadPromise;
 }
 
+async function ensureChatWorkspaceSelectionsLoaded(): Promise<void> {
+  if (chatWorkspaceSelectionsLoaded) {
+    return;
+  }
+
+  if (chatWorkspaceSelectionsLoadPromise) {
+    await chatWorkspaceSelectionsLoadPromise;
+    return;
+  }
+
+  chatWorkspaceSelectionsLoadPromise = (async () => {
+    try {
+      const raw = await fs.readFile(TELEGRAM_WORKSPACE_SELECTION_FILE, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, string>;
+      if (typeof parsed === "object" && parsed) {
+        for (const [rawChatId, workingDirectory] of Object.entries(parsed)) {
+          const parsedChatId = Number(rawChatId);
+          if (!Number.isInteger(parsedChatId)) {
+            continue;
+          }
+          if (typeof workingDirectory === "string" && workingDirectory.trim()) {
+            chatWorkspaceSelections.set(parsedChatId, workingDirectory.trim());
+          }
+        }
+      }
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error("Failed to load telegram workspace selections.", error);
+      }
+    } finally {
+      chatWorkspaceSelectionsLoaded = true;
+    }
+  })();
+
+  await chatWorkspaceSelectionsLoadPromise;
+}
+
 async function ensureChatCompletionCursorsLoaded(): Promise<void> {
   if (chatCompletionCursorsLoaded) {
     return;
@@ -501,6 +594,15 @@ async function persistChatSessionOverrides(): Promise<void> {
   await fs.writeFile(TELEGRAM_SESSION_OVERRIDES_FILE, JSON.stringify(payload, null, 2), "utf8");
 }
 
+async function persistChatWorkspaceSelections(): Promise<void> {
+  await fs.mkdir(path.dirname(TELEGRAM_WORKSPACE_SELECTION_FILE), { recursive: true });
+  const payload: Record<string, string> = {};
+  for (const [chatId, workingDirectory] of chatWorkspaceSelections.entries()) {
+    payload[String(chatId)] = workingDirectory;
+  }
+  await fs.writeFile(TELEGRAM_WORKSPACE_SELECTION_FILE, JSON.stringify(payload, null, 2), "utf8");
+}
+
 async function persistChatCompletionCursors(): Promise<void> {
   await fs.mkdir(path.dirname(TELEGRAM_COMPLETION_CURSOR_FILE), { recursive: true });
   const payload: Record<string, string> = {};
@@ -529,6 +631,22 @@ async function setSessionOverride(chatId: number, sessionId: string): Promise<vo
   await ensureChatSessionOverridesLoaded();
   chatSessionOverrides.set(chatId, sessionId);
   await persistChatSessionOverrides();
+}
+
+async function setChatWorkspaceSelection(chatId: number, workingDirectory: string): Promise<void> {
+  await ensureChatWorkspaceSelectionsLoaded();
+  chatWorkspaceSelections.set(chatId, workingDirectory);
+  await persistChatWorkspaceSelections();
+}
+
+async function getChatWorkspaceSelection(chatId: number): Promise<string | undefined> {
+  await ensureChatWorkspaceSelectionsLoaded();
+  return chatWorkspaceSelections.get(chatId);
+}
+
+async function listChatScopedResumeSessions(chatId: number): Promise<Awaited<ReturnType<typeof listResumeSessions>>> {
+  const workingDirectory = await getChatWorkspaceSelection(chatId);
+  return listResumeSessions(workingDirectory);
 }
 
 async function setChatSignalStyle(chatId: number, style: SignalRecommendationStyle): Promise<void> {
@@ -1375,7 +1493,7 @@ function parseCommand(input: string): ParsedTelegramCommand {
     case "s":
     case "session":
     case "settings":
-      return { kind: "sessionInfo" };
+      return { kind: "sessionInfo", query: arg || undefined };
     case "clear":
     case "reset":
       return { kind: "clear" };
@@ -1400,6 +1518,9 @@ function parseCommand(input: string): ParsedTelegramCommand {
     case "sc":
     case "shotme":
       return { kind: "screenshotLocal", target: arg || undefined };
+    case "workspace":
+    case "ws":
+      return { kind: "workspace", workingDirectory: arg || undefined };
     case "n":
     case "new":
       return { kind: "newSession" };
@@ -1468,17 +1589,34 @@ function parseResumeSessionCallbackData(data: string): string | null {
   return null;
 }
 
+function parseWorkspaceSelectionCallbackData(data: string): number | null {
+  const raw = data.trim();
+  if (!raw.startsWith(TELEGRAM_WORKSPACE_SELECTION_CALLBACK_PREFIX)) {
+    return null;
+  }
+
+  const indexText = raw.slice(TELEGRAM_WORKSPACE_SELECTION_CALLBACK_PREFIX.length).trim();
+  if (!indexText) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(indexText, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function buildSessionResumeReplyKeyboard(
   sessions: Array<{
     sessionId: string;
     title?: string | null;
     lastMessagePreview?: string | null;
+    updatedAt: string;
   }>,
   currentSessionId: string,
 ): TelegramReplyKeyboardMarkup {
   const keyboard = sessions.map((item, index) => {
     const isCurrent = item.sessionId === currentSessionId;
-    const rawLabel = item.title?.trim() || item.lastMessagePreview?.trim() || "대화 없음";
+    const fallbackLabel = `${formatTelegramJobTime(item.updatedAt)} · ${item.sessionId.slice(0, 8)}`;
+    const rawLabel = item.title?.trim() || item.lastMessagePreview?.trim() || fallbackLabel;
     const displayLabel = rawLabel.length > TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT
       ? `${rawLabel.slice(0, TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT)}...`
       : rawLabel;
@@ -1514,6 +1652,64 @@ function buildCommandSelectionReplyKeyboard(
   };
 }
 
+async function listTelegramWorkspaceDirectories(): Promise<string[]> {
+  const workspaceRoot = getAgentWorkspaceRoot();
+  const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+    .map((entry) => entry.name)
+    .sort((left, right) => left.localeCompare(right, "ko"));
+}
+
+function buildWorkspaceSelectionInlineKeyboard(
+  directories: string[],
+): TelegramInlineKeyboardMarkup {
+  const buttonEntries = directories.map((directory, index) => ({
+    text: directory.length > 40 ? `${directory.slice(0, 37)}...` : directory,
+    callback_data: `${TELEGRAM_WORKSPACE_SELECTION_CALLBACK_PREFIX}${index + 1}`,
+    directory,
+  }));
+  const workspaceEntry = buttonEntries.find((entry) => entry.directory === "workspace");
+  const remainingEntries = buttonEntries.filter((entry) => entry.directory !== "workspace");
+  const inlineKeyboard = remainingEntries.reduce<Array<typeof buttonEntries>>((rows, entry, index) => {
+    if (index % 3 === 0) {
+      rows.push([]);
+    }
+    rows[rows.length - 1].push(entry);
+    return rows;
+  }, []);
+
+  if (workspaceEntry) {
+    inlineKeyboard.unshift([workspaceEntry]);
+  }
+
+  return {
+    inline_keyboard: inlineKeyboard,
+  };
+}
+
+function setTelegramWorkspaceBrowseState(chatId: number, directories: string[]): void {
+  chatWorkspaceBrowseState.set(chatId, {
+    directories,
+    createdAt: Date.now(),
+  });
+}
+
+function getTelegramWorkspaceBrowseSelection(chatId: number, index: number): string | null {
+  const state = chatWorkspaceBrowseState.get(chatId);
+  if (!state) {
+    return null;
+  }
+
+  const maxAgeMs = 30 * 60 * 1000;
+  if (Date.now() - state.createdAt > maxAgeMs) {
+    chatWorkspaceBrowseState.delete(chatId);
+    return null;
+  }
+
+  return state.directories[index - 1] ?? null;
+}
+
 function buildModelReplyKeyboard(currentModel: string): TelegramReplyKeyboardMarkup {
   return buildCommandSelectionReplyKeyboard(
     SUPPORTED_MODELS.map((model, index) => {
@@ -1541,23 +1737,27 @@ function buildReasoningReplyKeyboard(currentReasoning: string): TelegramReplyKey
 function formatHelpText(): string {
   const base = [
     "명령어 안내:",
-    "메뉴 버튼 추천 TOP 5:",
+    "메뉴 버튼 안내:",
     "- /run <요청>: Codex에 바로 작업 전달",
     "- /status: 현재 세션 상태 확인",
     "- `/jobs [개수]`: 최근 작업 목록 빠르게 확인",
-    "- /s 또는 /session: 세션 목록 조회 및 전환",
+    "- /c 또는 /cancel: 진행 중인 작업 취소",
+    "- /w 또는 /workspace: 기본 작업 폴더 선택",
+    "- /n 또는 /new: 새 세션 시작",
+    "- `/m`, `/model`, `/models`: 모델 목록 조회",
+    "- `/e`, `/effort`: 사고수준 목록 조회",
     "- /h 또는 /help: 전체 도움말 다시 보기",
     "- `/run` 없이 텍스트만 보내도 실행됩니다.",
-    "- /c 또는 /cancel: 진행 중인 작업 취소",
-    "- /sc 또는 /screencap [라벨]: 내 화면 캡처 후 이미지 전송",
-    "- /n 또는 /new: 새 세션으로 강제 전환",
-    "- /t 또는 /title <제목>: 현재 세션 제목 설정 (예: /title 버그 수정)",
-    "- `/m`, `/model`, `/models`: 모델 목록 조회",
+    "",
+    "추가 명령:",
+    "- /s 또는 /session [키워드]: 세션 목록 조회 및 전환",
+    "- `/workspace <폴더>`: 기본 작업 폴더를 바로 지정",
     "- `/m <번호|모델명>`, `/model <번호|모델명>`: 기본 모델 변경",
-    "- `/e`, `/effort`: 사고수준 목록 조회",
     "- `/e <번호|사고수준>`, `/effort <번호|사고수준>`: 사고수준 변경",
     "- `/recent [개수]`: 최근 대화 미리보기 (기본 6개)",
     "- /resume <번호|세션ID>: 기존 세션으로 전환",
+    "- /sc 또는 /screencap [라벨]: 내 화면 캡처 후 이미지 전송",
+    "- /t 또는 /title <제목>: 현재 세션 제목 설정 (예: /title 버그 수정)",
     "- /log [개수]: 최근 이벤트 로그 조회 (기본 40줄)",
     "- /clear: 대화 기록 초기화",
     "- /ping: 연결 테스트",
@@ -1571,16 +1771,389 @@ function formatHelpText(): string {
   return base.join("\n");
 }
 
-function splitTelegramText(text: string, limit: number): string[] {
-  if (text.length === 0) {
-    return [""];
+type TelegramFormattedBlock =
+  | { kind: "text"; value: string }
+  | { kind: "diff"; value: string }
+  | { kind: "code"; value: string; language?: string };
+
+type TelegramFormattedChunk = {
+  text: string;
+  parseMode?: "HTML";
+};
+
+function escapeTelegramHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function tryParseJsonTelegramBlock(text: string): TelegramFormattedBlock | null {
+  const trimmed = text.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+    return null;
   }
 
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < text.length) {
-    chunks.push(text.slice(start, start + limit));
-    start += limit;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return {
+      kind: "code",
+      language: "json",
+      value: JSON.stringify(parsed, null, 2),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isTelegramUnifiedDiff(text: string): boolean {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const lines = normalized.split("\n");
+  const hasFileHeader = lines.some((line) => line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("diff --git "));
+  const hasHunk = lines.some((line) => line.startsWith("@@ "));
+  const hasChangeLine = lines.some((line) => line.startsWith("+") || line.startsWith("-"));
+
+  return hasFileHeader && (hasHunk || hasChangeLine);
+}
+
+function parseTelegramFormattedBlocks(text: string): TelegramFormattedBlock[] {
+  const jsonBlock = tryParseJsonTelegramBlock(text);
+  if (jsonBlock) {
+    return [jsonBlock];
+  }
+
+  if (isTelegramUnifiedDiff(text)) {
+    return [{ kind: "diff", value: text.replace(/\r\n/g, "\n") }];
+  }
+
+  const normalized = text.replace(/\r\n/g, "\n");
+  const blocks: TelegramFormattedBlock[] = [];
+  const fencePattern = /```([a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g;
+  let lastIndex = 0;
+
+  for (const match of normalized.matchAll(fencePattern)) {
+    const start = match.index ?? 0;
+    if (start > lastIndex) {
+      const preceding = normalized.slice(lastIndex, start);
+      if (preceding.trim()) {
+        blocks.push({ kind: "text", value: preceding });
+      }
+    }
+
+    const language = match[1]?.trim() || undefined;
+    blocks.push(
+      language === "diff"
+        ? {
+            kind: "diff",
+            value: (match[2] || "").replace(/\n$/, ""),
+          }
+        : {
+            kind: "code",
+            language,
+            value: (match[2] || "").replace(/\n$/, ""),
+          },
+    );
+
+    lastIndex = start + match[0].length;
+  }
+
+  if (lastIndex < normalized.length) {
+    const trailing = normalized.slice(lastIndex);
+    if (trailing.trim()) {
+      blocks.push({ kind: "text", value: trailing });
+    }
+  }
+
+  return blocks.length > 0 ? blocks : [{ kind: "text", value: normalized }];
+}
+
+function renderTelegramInlineHtml(text: string): string {
+  let rendered = escapeTelegramHtml(text);
+
+  rendered = rendered.replace(
+    /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    (_match, label: string, href: string) => `<a href="${href}">${label}</a>`,
+  );
+  rendered = rendered.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+  rendered = rendered.replace(/~~([^~\n]+)~~/g, "<s>$1</s>");
+  rendered = rendered.replace(/(^|[^\w*])\*([^*\n]+)\*(?!\*)/g, "$1<i>$2</i>");
+  rendered = rendered.replace(/(^|[^\w_])_([^_\n]+)_(?!_)/g, "$1<i>$2</i>");
+  rendered = rendered.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+
+  return rendered;
+}
+
+function isTelegramTableLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) {
+    return false;
+  }
+
+  const separators = trimmed.match(/\|/g)?.length ?? 0;
+  return separators >= 2;
+}
+
+function isTelegramTableDivider(line: string): boolean {
+  const normalized = line.replace(/\s+/g, "");
+  return /^[:|\-]+$/.test(normalized) && normalized.includes("-");
+}
+
+function renderTelegramTableLine(line: string): string {
+  const cells = line
+    .split("|")
+    .map((cell) => cell.trim())
+    .filter(Boolean);
+
+  if (cells.length === 0) {
+    return "";
+  }
+
+  return `<code>${escapeTelegramHtml(cells.join(" | "))}</code>`;
+}
+
+function renderTelegramTextHtml(text: string): string {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const lines = normalized.split("\n").map((line) => {
+    if (isTelegramTableDivider(line)) {
+      return "";
+    }
+    if (isTelegramTableLine(line)) {
+      return renderTelegramTableLine(line);
+    }
+    if (/^#{1,6}\s+/.test(line)) {
+      return `<b>${renderTelegramInlineHtml(line.replace(/^#{1,6}\s+/, "").trim())}</b>`;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      return `• ${renderTelegramInlineHtml(line.replace(/^\s*[-*]\s+/, "").trim())}`;
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      return renderTelegramInlineHtml(line.trim());
+    }
+    if (/^\s*>\s?/.test(line)) {
+      return `┃ ${renderTelegramInlineHtml(line.replace(/^\s*>\s?/, "").trim())}`;
+    }
+    return renderTelegramInlineHtml(line);
+  });
+
+  return lines.filter(Boolean).join("\n");
+}
+
+function renderTelegramCodeHtml(code: string, language?: string): string {
+  const escaped = escapeTelegramHtml(code.trimEnd());
+  if (language?.trim()) {
+    return `<pre><code class="language-${escapeTelegramHtml(language.trim())}">${escaped}</code></pre>`;
+  }
+  return `<pre><code>${escaped}</code></pre>`;
+}
+
+function formatTelegramDiffLine(line: string): string {
+  if (line.startsWith("diff --git ")) {
+    return `🧩 ${line}`;
+  }
+  if (line.startsWith("index ")) {
+    return `ℹ️ ${line}`;
+  }
+  if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+    return `📄 ${line}`;
+  }
+  if (line.startsWith("@@ ")) {
+    return `🔵 ${line}`;
+  }
+  if (line.startsWith("+") && !line.startsWith("+++ ")) {
+    return `🟢 ${line}`;
+  }
+  if (line.startsWith("-") && !line.startsWith("--- ")) {
+    return `🔴 ${line}`;
+  }
+  if (line.startsWith("\\")) {
+    return `⚠️ ${line}`;
+  }
+  return `⚪ ${line}`;
+}
+
+function renderTelegramDiffHtml(diff: string): string {
+  const rendered = diff
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => formatTelegramDiffLine(line))
+    .join("\n");
+
+  return `<pre>${escapeTelegramHtml(rendered.trimEnd())}</pre>`;
+}
+
+function splitTelegramTextBlock(text: string, limit: number): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const lines = normalized.split("\n");
+  const parts: string[] = [];
+  let current = "";
+
+  const flushCurrent = () => {
+    if (!current.trim()) {
+      current = "";
+      return;
+    }
+    parts.push(current.trimEnd());
+    current = "";
+  };
+
+  for (const line of lines) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (renderTelegramTextHtml(candidate).length <= limit) {
+      current = candidate;
+      continue;
+    }
+
+    flushCurrent();
+    if (renderTelegramTextHtml(line).length <= limit) {
+      current = line;
+      continue;
+    }
+
+    let start = 0;
+    const sliceSize = Math.max(256, Math.floor(limit / 2));
+    while (start < line.length) {
+      const piece = line.slice(start, start + sliceSize);
+      parts.push(piece);
+      start += sliceSize;
+    }
+  }
+
+  flushCurrent();
+  return parts;
+}
+
+function splitTelegramCodeBlock(code: string, language: string | undefined, limit: number): string[] {
+  if (renderTelegramCodeHtml(code, language).length <= limit) {
+    return [renderTelegramCodeHtml(code, language)];
+  }
+
+  const lines = code.replace(/\r\n/g, "\n").split("\n");
+  const parts: string[] = [];
+  let current = "";
+
+  const flushCurrent = () => {
+    if (!current) {
+      return;
+    }
+    parts.push(renderTelegramCodeHtml(current, language));
+    current = "";
+  };
+
+  for (const line of lines) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (renderTelegramCodeHtml(candidate, language).length <= limit) {
+      current = candidate;
+      continue;
+    }
+
+    flushCurrent();
+    if (renderTelegramCodeHtml(line, language).length <= limit) {
+      current = line;
+      continue;
+    }
+
+    let start = 0;
+    const sliceSize = Math.max(256, Math.floor(limit / 2));
+    while (start < line.length) {
+      parts.push(renderTelegramCodeHtml(line.slice(start, start + sliceSize), language));
+      start += sliceSize;
+    }
+  }
+
+  flushCurrent();
+  return parts;
+}
+
+function splitTelegramDiffBlock(diff: string, limit: number): string[] {
+  if (renderTelegramDiffHtml(diff).length <= limit) {
+    return [renderTelegramDiffHtml(diff)];
+  }
+
+  const lines = diff.replace(/\r\n/g, "\n").split("\n");
+  const parts: string[] = [];
+  let current = "";
+
+  const flushCurrent = () => {
+    if (!current) {
+      return;
+    }
+    parts.push(renderTelegramDiffHtml(current));
+    current = "";
+  };
+
+  for (const line of lines) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (renderTelegramDiffHtml(candidate).length <= limit) {
+      current = candidate;
+      continue;
+    }
+
+    flushCurrent();
+    if (renderTelegramDiffHtml(line).length <= limit) {
+      current = line;
+      continue;
+    }
+
+    let start = 0;
+    const sliceSize = Math.max(256, Math.floor(limit / 2));
+    while (start < line.length) {
+      parts.push(renderTelegramDiffHtml(line.slice(start, start + sliceSize)));
+      start += sliceSize;
+    }
+  }
+
+  flushCurrent();
+  return parts;
+}
+
+function buildTelegramFormattedChunks(text: string): TelegramFormattedChunk[] {
+  const blocks = parseTelegramFormattedBlocks(text);
+  const maxLength = TELEGRAM_CHAT_TEXT_LIMIT - 64;
+  const renderedSegments = blocks.flatMap((block) => {
+    if (block.kind === "diff") {
+      return splitTelegramDiffBlock(block.value, maxLength);
+    }
+    if (block.kind === "code") {
+      return splitTelegramCodeBlock(block.value, block.language, maxLength);
+    }
+
+    return splitTelegramTextBlock(block.value, maxLength).map((part) => renderTelegramTextHtml(part));
+  }).filter(Boolean);
+
+  if (renderedSegments.length === 0) {
+    return [{ text: escapeTelegramHtml(text.slice(0, maxLength)), parseMode: "HTML" }];
+  }
+
+  const chunks: TelegramFormattedChunk[] = [];
+  let current = "";
+
+  for (const segment of renderedSegments) {
+    const candidate = current ? `${current}\n\n${segment}` : segment;
+    if (candidate.length <= maxLength) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      chunks.push({ text: current, parseMode: "HTML" });
+    }
+    current = segment;
+  }
+
+  if (current) {
+    chunks.push({ text: current, parseMode: "HTML" });
   }
 
   return chunks;
@@ -1694,6 +2267,65 @@ async function callTelegramApi<T>(method: string, payload: Record<string, unknow
   throw new Error("Telegram API error: exceeded retry limit");
 }
 
+function serializeTelegramCommands(commands: readonly TelegramBotCommand[]): string {
+  return JSON.stringify(
+    commands.map((command) => ({
+      command: command.command.trim(),
+      description: command.description.trim(),
+    })),
+  );
+}
+
+function serializeTelegramCommandScope(scope?: TelegramBotCommandScope): string {
+  if (!scope || scope.type === "default") {
+    return "default";
+  }
+  if (scope.type === "chat") {
+    return `chat:${scope.chat_id}`;
+  }
+  return scope.type;
+}
+
+function areTelegramCommandsEqual(
+  left: readonly TelegramBotCommand[],
+  right: readonly TelegramBotCommand[],
+): boolean {
+  return serializeTelegramCommands(left) === serializeTelegramCommands(right);
+}
+
+async function getTelegramBotCommands(scope?: TelegramBotCommandScope): Promise<TelegramBotCommand[]> {
+  return callTelegramApi<TelegramBotCommand[]>(
+    "getMyCommands",
+    scope && scope.type !== "default" ? { scope } : {},
+  );
+}
+
+async function setTelegramBotCommands(
+  commands: readonly TelegramBotCommand[],
+  scope?: TelegramBotCommandScope,
+): Promise<void> {
+  await callTelegramApi("setMyCommands", scope && scope.type !== "default" ? { commands, scope } : { commands });
+}
+
+async function ensureTelegramMenuCommandsRegistered(scope?: TelegramBotCommandScope): Promise<void> {
+  const desiredSignature = serializeTelegramCommands(TELEGRAM_MENU_COMMANDS);
+  const scopeKey = serializeTelegramCommandScope(scope);
+  if (telegramMenuSyncState.get(scopeKey) === desiredSignature) {
+    return;
+  }
+
+  const currentCommands = await getTelegramBotCommands(scope);
+  if (!areTelegramCommandsEqual(currentCommands, TELEGRAM_MENU_COMMANDS)) {
+    await setTelegramBotCommands(TELEGRAM_MENU_COMMANDS, scope);
+    await appendTelegramEventLog("telegram_menu.synced", {
+      commandCount: TELEGRAM_MENU_COMMANDS.length,
+      scope: scopeKey,
+    });
+  }
+
+  telegramMenuSyncState.set(scopeKey, desiredSignature);
+}
+
 async function downloadTelegramFile(
   attachment: TelegramIncomingAttachment,
 ): Promise<{ savedPath: string; fileName: string }> {
@@ -1731,15 +2363,17 @@ function appendAttachmentContextToRunMessage(message: string, attachmentPath: st
 }
 
 async function sendTelegramMessage(chatId: number, text: string): Promise<TelegramSentMessage> {
-  const chunks = splitTelegramText(text, TELEGRAM_CHAT_TEXT_LIMIT - 64);
+  const chunks = buildTelegramFormattedChunks(text);
   let sentMessageId: number | null = null;
 
   for (const [index, chunk] of chunks.entries()) {
-    const body = chunks.length > 1 ? `[${index + 1}/${chunks.length}]\n${chunk}` : chunk;
+    const prefix = chunks.length > 1 ? `[${index + 1}/${chunks.length}]\n` : "";
+    const body = `${prefix}${chunk.text}`;
     const sent = await callTelegramApi<TelegramSentMessage>("sendMessage", {
       chat_id: chatId,
-      text: body,
+      text: body.slice(0, TELEGRAM_CHAT_TEXT_LIMIT),
       disable_web_page_preview: true,
+      parse_mode: chunk.parseMode,
     });
     sentMessageId = sent.message_id;
   }
@@ -1760,15 +2394,31 @@ async function sendTelegramMessageWithRemovedKeyboard(
   chatId: number,
   text: string,
 ): Promise<TelegramSentMessage> {
-  const sent = await callTelegramApi<TelegramSentMessage>("sendMessage", {
-    chat_id: chatId,
-    text: text.slice(0, TELEGRAM_CHAT_TEXT_LIMIT),
-    disable_web_page_preview: true,
-    reply_markup: {
-      remove_keyboard: true,
-    } satisfies TelegramReplyKeyboardRemove,
-  });
-  return sent;
+  const chunks = buildTelegramFormattedChunks(text);
+  const chunksToSend = chunks.length > 0 ? chunks : [{
+    text: escapeTelegramHtml(text.slice(0, TELEGRAM_CHAT_TEXT_LIMIT)),
+    parseMode: "HTML" as const,
+  }];
+  let sentMessageId: number | null = null;
+
+  for (const [index, chunk] of chunksToSend.entries()) {
+    const prefix = chunksToSend.length > 1 ? `[${index + 1}/${chunksToSend.length}]\n` : "";
+    const body = `${prefix}${chunk.text}`;
+    const sent = await callTelegramApi<TelegramSentMessage>("sendMessage", {
+      chat_id: chatId,
+      text: body.slice(0, TELEGRAM_CHAT_TEXT_LIMIT),
+      disable_web_page_preview: true,
+      parse_mode: chunk.parseMode,
+      reply_markup: index === chunksToSend.length - 1
+        ? ({
+            remove_keyboard: true,
+          } satisfies TelegramReplyKeyboardRemove)
+        : undefined,
+    });
+    sentMessageId = sent.message_id;
+  }
+
+  return { message_id: sentMessageId ?? 0 };
 }
 
 async function sendTelegramMessageWithReplyKeyboard(
@@ -1776,13 +2426,55 @@ async function sendTelegramMessageWithReplyKeyboard(
   text: string,
   replyMarkup: TelegramReplyKeyboardMarkup,
 ): Promise<TelegramSentMessage> {
-  const sent = await callTelegramApi<TelegramSentMessage>("sendMessage", {
-    chat_id: chatId,
-    text: text.slice(0, TELEGRAM_CHAT_TEXT_LIMIT),
-    disable_web_page_preview: true,
-    reply_markup: replyMarkup,
-  });
-  return sent;
+  const chunks = buildTelegramFormattedChunks(text);
+  const chunksToSend = chunks.length > 0 ? chunks : [{
+    text: escapeTelegramHtml(text.slice(0, TELEGRAM_CHAT_TEXT_LIMIT)),
+    parseMode: "HTML" as const,
+  }];
+  let sentMessageId: number | null = null;
+
+  for (const [index, chunk] of chunksToSend.entries()) {
+    const prefix = chunksToSend.length > 1 ? `[${index + 1}/${chunksToSend.length}]\n` : "";
+    const body = `${prefix}${chunk.text}`;
+    const sent = await callTelegramApi<TelegramSentMessage>("sendMessage", {
+      chat_id: chatId,
+      text: body.slice(0, TELEGRAM_CHAT_TEXT_LIMIT),
+      disable_web_page_preview: true,
+      parse_mode: chunk.parseMode,
+      reply_markup: index === chunksToSend.length - 1 ? replyMarkup : undefined,
+    });
+    sentMessageId = sent.message_id;
+  }
+
+  return { message_id: sentMessageId ?? 0 };
+}
+
+async function sendTelegramMessageWithInlineKeyboard(
+  chatId: number,
+  text: string,
+  replyMarkup: TelegramInlineKeyboardMarkup,
+): Promise<TelegramSentMessage> {
+  const chunks = buildTelegramFormattedChunks(text);
+  const chunksToSend = chunks.length > 0 ? chunks : [{
+    text: escapeTelegramHtml(text.slice(0, TELEGRAM_CHAT_TEXT_LIMIT)),
+    parseMode: "HTML" as const,
+  }];
+  let sentMessageId: number | null = null;
+
+  for (const [index, chunk] of chunksToSend.entries()) {
+    const prefix = chunksToSend.length > 1 ? `[${index + 1}/${chunksToSend.length}]\n` : "";
+    const body = `${prefix}${chunk.text}`;
+    const sent = await callTelegramApi<TelegramSentMessage>("sendMessage", {
+      chat_id: chatId,
+      text: body.slice(0, TELEGRAM_CHAT_TEXT_LIMIT),
+      disable_web_page_preview: true,
+      parse_mode: chunk.parseMode,
+      reply_markup: index === chunksToSend.length - 1 ? replyMarkup : undefined,
+    });
+    sentMessageId = sent.message_id;
+  }
+
+  return { message_id: sentMessageId ?? 0 };
 }
 
 async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
@@ -1870,6 +2562,25 @@ async function editTelegramMessage(chatId: number, messageId: number, text: stri
         message_id: messageId,
         text: safeText,
         disable_web_page_preview: true,
+      });
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("message is not modified")) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function clearTelegramInlineKeyboard(chatId: number, messageId: number): Promise<void> {
+  try {
+    await runTelegramMessageEditWithThrottle(chatId, messageId, async () => {
+      await callTelegramApi("editMessageReplyMarkup", {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: {
+          inline_keyboard: [],
+        } satisfies TelegramInlineKeyboardMarkup,
       });
     });
   } catch (error) {
@@ -2167,22 +2878,37 @@ async function handleReasoningCommand(
   );
 }
 
-async function handleSessionInfoCommand(chatId: number, sessionId: string): Promise<void> {
+async function handleSessionInfoCommand(chatId: number, sessionId: string, query?: string): Promise<void> {
   const session = await loadSession(sessionId);
   const currentTitle = session.title?.trim();
+  const selectedWorkspace = await getChatWorkspaceSelection(chatId);
+  const workingDirectory = await getSessionWorkingDirectoryLabel(sessionId);
   const model = getSessionModel(session.model);
   const reasoning = getSessionReasoning(session.reasoningEffort);
   const traceMode = getTraceMode(sessionId) ? "ON" : "OFF";
   const active = session.activeJobId ? "진행중" : "없음";
-  const sessions = await listSessions();
+  const sessions = filterTelegramResumeSessions(await listChatScopedResumeSessions(chatId), query);
   const targets = sessions.slice(0, TELEGRAM_SESSION_LIST_LIMIT);
+  setTelegramSessionBrowseState(chatId, query, targets.map((item) => item.sessionId));
 
   const currentSessionLine = `현재 세션: ${sessionId}`;
-  const selectionHelp = `총 ${sessions.length}개 중 ${targets.length}개 표시`;
+  const selectionHelp = query?.trim()
+    ? `필터: ${query.trim()} · 총 ${sessions.length}개 중 ${targets.length}개 표시`
+    : `작업 폴더 ${selectedWorkspace || "(미선택)"} 기준 최근 ${targets.length}개 / 전체 ${sessions.length}개`;
+  let selectorIndex = 1;
+  const selectorLines = targets.length > 0
+    ? targets.map((item) => {
+        const line = formatTelegramSessionSelectorLine(item, selectorIndex, sessionId);
+        selectorIndex += 1;
+        return line;
+      })
+    : [query?.trim() ? "(일치하는 세션 없음)" : "(표시할 세션 없음)"];
 
   const body = [
     currentSessionLine,
     `현재 세션 제목: ${currentTitle || "(미설정)"}`,
+    `선택 작업 폴더: ${selectedWorkspace || "(미설정)"}`,
+    `기본 작업 위치: ${workingDirectory || "(미설정)"}`,
     `모델: ${getModelLabel(model)} (${model})`,
     `사고수준: ${formatReasoningLabel(reasoning)} (${reasoning})`,
     `트레이스: ${traceMode}`,
@@ -2192,14 +2918,7 @@ async function handleSessionInfoCommand(chatId: number, sessionId: string): Prom
     selectionHelp,
     "",
     "번호를 탭하면 즉시 전환됩니다. (/resume 1 형태로 즉시 실행)",
-    ...targets.map((item, index) => {
-      const rawLabel = item.title?.trim() || item.lastMessagePreview?.trim() || "대화 없음";
-      const clippedLabel = rawLabel.length > TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT
-        ? `${rawLabel.slice(0, TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT)}...`
-        : rawLabel;
-      const marker = item.sessionId === sessionId ? " [현재]" : "";
-      return `${index + 1}. ${clippedLabel}${marker}`;
-    }),
+    ...selectorLines,
   ].join("\n");
 
   if (targets.length === 0) {
@@ -2212,13 +2931,14 @@ async function handleSessionInfoCommand(chatId: number, sessionId: string): Prom
       sessionId: item.sessionId,
       title: item.title,
       lastMessagePreview: item.lastMessagePreview,
+      updatedAt: item.updatedAt,
     })),
     sessionId,
   );
 
   await sendTelegramMessageWithReplyKeyboard(
     chatId,
-    `${body}\n아래 버튼으로 바로 전환`,
+    `${body}\n${query?.trim() ? "같은 필터 기준으로 /resume 1 처럼 바로 선택할 수 있습니다." : "아래 버튼으로 바로 전환"}`,
     replyKeyboard,
   );
 }
@@ -2255,6 +2975,65 @@ function formatTelegramJobStatus(status: "completed" | "failed"): string {
   return status === "completed" ? "완료" : "실패";
 }
 
+function formatTelegramSessionSelectorLine(
+  session: Awaited<ReturnType<typeof listResumeSessions>>[number],
+  index: number,
+  currentSessionId: string,
+): string {
+  const rawLabel = session.title?.trim() || session.lastMessagePreview?.trim() || "제목 없음";
+  const clippedLabel = rawLabel.length > TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT
+    ? `${rawLabel.slice(0, TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT)}...`
+    : rawLabel;
+  const timestamp = formatTelegramJobTime(session.updatedAt);
+  const shortSessionId = session.sessionId.slice(0, 8);
+  const marker = session.sessionId === currentSessionId ? " [현재]" : "";
+  return `${index}. ${timestamp} | ${clippedLabel} | ${shortSessionId}${marker}`;
+}
+
+function filterTelegramResumeSessions(
+  sessions: Awaited<ReturnType<typeof listResumeSessions>>,
+  query?: string,
+): Awaited<ReturnType<typeof listResumeSessions>> {
+  const normalizedQuery = query?.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return sessions;
+  }
+
+  return sessions.filter((session) => {
+    const title = session.title?.toLowerCase() || "";
+    const preview = session.lastMessagePreview?.toLowerCase() || "";
+    const sessionId = session.sessionId.toLowerCase();
+    return (
+      title.includes(normalizedQuery) ||
+      preview.includes(normalizedQuery) ||
+      sessionId.includes(normalizedQuery)
+    );
+  });
+}
+
+function setTelegramSessionBrowseState(chatId: number, query: string | undefined, targetSessionIds: string[]): void {
+  chatSessionBrowseState.set(chatId, {
+    query: query?.trim() || undefined,
+    targetSessionIds,
+    createdAt: Date.now(),
+  });
+}
+
+function getTelegramSessionBrowseTargets(chatId: number): string[] | null {
+  const state = chatSessionBrowseState.get(chatId);
+  if (!state) {
+    return null;
+  }
+
+  const maxAgeMs = 30 * 60 * 1000;
+  if (Date.now() - state.createdAt > maxAgeMs) {
+    chatSessionBrowseState.delete(chatId);
+    return null;
+  }
+
+  return state.targetSessionIds;
+}
+
 function isFinishedJobStatus(status: string): status is "completed" | "failed" {
   return status === "completed" || status === "failed";
 }
@@ -2276,7 +3055,7 @@ async function buildCrossSessionCompletionNotice(chatId: number, targetSessionId
     return null;
   }
 
-  const sessions = (await listSessions()).filter(
+  const sessions = (await listChatScopedResumeSessions(chatId)).filter(
     (session) => session.sessionId !== targetSessionId && isSessionOwnedByChat(chatId, session.sessionId),
   );
   if (sessions.length === 0) {
@@ -2363,6 +3142,10 @@ async function switchSession(
   }
 
   const targetSession = await loadSession(targetSessionId);
+  const selectedWorkingDirectory = await getChatWorkspaceSelection(chatId);
+  if (selectedWorkingDirectory) {
+    await setSessionWorkingDirectory(targetSessionId, selectedWorkingDirectory);
+  }
   const targetSessionTitle = targetSession.title?.trim() || null;
   await setSessionOverride(chatId, targetSessionId);
   const completionNotice = await buildCrossSessionCompletionNotice(chatId, targetSessionId);
@@ -2423,8 +3206,13 @@ async function handleResumeSessionCommand(
   selector: string,
   currentSessionId: string,
 ): Promise<void> {
-  const sessions = await listSessions();
-  const targets = sessions.slice(0, TELEGRAM_SESSION_LIST_LIMIT);
+  const sessions = await listChatScopedResumeSessions(chatId);
+  const browseTargets = getTelegramSessionBrowseTargets(chatId);
+  const targets = browseTargets
+    ? browseTargets
+        .map((sessionId) => sessions.find((session) => session.sessionId === sessionId))
+        .filter(Boolean)
+    : sessions.slice(0, TELEGRAM_SESSION_LIST_LIMIT);
   if (targets.length === 0) {
     await sendTelegramMessage(chatId, "이동 가능한 세션이 없습니다.");
     return;
@@ -2435,9 +3223,9 @@ async function handleResumeSessionCommand(
   const numberCandidate = Number.parseInt(trimmed, 10);
 
   if (Number.isInteger(numberCandidate) && numberCandidate > 0 && numberCandidate <= targets.length) {
-    selectedSessionId = targets[numberCandidate - 1].sessionId;
+    selectedSessionId = targets[numberCandidate - 1]?.sessionId ?? null;
   } else {
-    selectedSessionId = targets.find((session) => session.sessionId === trimmed)?.sessionId ?? null;
+    selectedSessionId = sessions.find((session) => session.sessionId === trimmed)?.sessionId ?? null;
   }
 
   if (!selectedSessionId) {
@@ -2580,15 +3368,69 @@ async function handleClearCommand(chatId: number, sessionId: string): Promise<vo
   await sendTelegramMessage(chatId, `대화 기록을 초기화했습니다. (${removedCount}개 삭제)`);
 }
 
+async function handleWorkspaceCommand(chatId: number, workingDirectory?: string): Promise<void> {
+  const normalizedWorkingDirectory = workingDirectory?.trim();
+  if (!normalizedWorkingDirectory) {
+    const workspaceDirectories = await listTelegramWorkspaceDirectories();
+    if (workspaceDirectories.length === 0) {
+      await sendTelegramMessage(chatId, "선택할 작업 폴더가 없습니다.");
+      return;
+    }
+
+    await sendTelegramMessageWithInlineKeyboard(
+      chatId,
+      [
+        "기본 작업 폴더를 선택하세요.",
+        `기준 위치: ${path.basename(getAgentWorkspaceRoot())}`,
+        "이후 /new 와 /resume 세션은 이 폴더를 기본 spawn 위치로 사용합니다.",
+      ].join("\n"),
+      buildWorkspaceSelectionInlineKeyboard(workspaceDirectories),
+    );
+    setTelegramWorkspaceBrowseState(chatId, workspaceDirectories);
+    return;
+  }
+
+  const workspaceDirectories = await listTelegramWorkspaceDirectories();
+  if (!workspaceDirectories.includes(normalizedWorkingDirectory)) {
+    await sendTelegramMessage(
+      chatId,
+      [
+        `작업 폴더를 찾지 못했습니다: ${normalizedWorkingDirectory}`,
+        "메뉴에서 선택하거나 `/workspace <폴더명>` 형식으로 다시 입력해 주세요.",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  await setChatWorkspaceSelection(chatId, normalizedWorkingDirectory);
+  await sendTelegramMessage(
+    chatId,
+    [
+      "기본 작업 폴더를 설정했습니다.",
+      `선택 폴더: ${normalizedWorkingDirectory}`,
+      "이후 /new 와 /resume 에 적용됩니다.",
+    ].join("\n"),
+  );
+}
+
 async function handleNewSessionCommand(chatId: number): Promise<void> {
+  const previousSessionId = await getSessionIdForChat(chatId);
   const nextSessionId = createNewSessionId(chatId);
   await setSessionOverride(chatId, nextSessionId);
   await loadSession(nextSessionId);
+  const selectedWorkingDirectory = await getChatWorkspaceSelection(chatId);
+  if (selectedWorkingDirectory) {
+    await setSessionWorkingDirectory(nextSessionId, selectedWorkingDirectory);
+  }
   await sendTelegramMessage(
     chatId,
     [
       "새 세션을 시작했습니다.",
+      `이전 세션: ${previousSessionId}`,
       `세션 ID: ${nextSessionId}`,
+      ...(selectedWorkingDirectory
+        ? [`기본 작업 위치: ${await getSessionWorkingDirectoryLabel(nextSessionId)}`]
+        : []),
       "기존 대화 컨텍스트와 분리되어 동작합니다.",
       "이후 /run, /model, /effort, /status 등은 새 세션에서 처리됩니다.",
     ].join("\n"),
@@ -2678,6 +3520,14 @@ export async function POST(request: Request): Promise<Response> {
       }
     }
 
+    try {
+      await ensureTelegramMenuCommandsRegistered();
+      await ensureTelegramMenuCommandsRegistered({ type: "all_private_chats" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown";
+      await appendTelegramEventLog("telegram_menu.sync_failed", { error: message });
+    }
+
     const body = (await request.json()) as TelegramUpdate;
     if (markTelegramUpdateProcessed(body.update_id)) {
       await appendTelegramEventLog("update.duplicate_skipped", {
@@ -2695,6 +3545,19 @@ export async function POST(request: Request): Promise<Response> {
 
     const callbackQuery = body.callback_query;
     if (callbackQuery) {
+      const callbackMenuChatId = callbackQuery.message?.chat?.id;
+      if (typeof callbackMenuChatId === "number") {
+        try {
+          await ensureTelegramMenuCommandsRegistered({ type: "chat", chat_id: callbackMenuChatId });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "unknown";
+          await appendTelegramEventLog("telegram_menu.sync_failed", {
+            error: message,
+            scope: `chat:${callbackMenuChatId}`,
+          });
+        }
+      }
+
       await appendTelegramEventLog("callback_query.received", {
         callbackQueryId: callbackQuery.id,
         from: callbackQuery.from?.id,
@@ -2716,6 +3579,73 @@ export async function POST(request: Request): Promise<Response> {
         return Response.json({ ok: true }, { status: 200 });
       }
 
+      const selectedWorkspaceIndex = parseWorkspaceSelectionCallbackData(callbackQuery.data);
+      if (selectedWorkspaceIndex) {
+        if (TELEGRAM_AUTH_REQUIRED) {
+          const authorized = await isAuthorizedChat(callbackQuery.from.id);
+          if (!authorized) {
+            await appendTelegramEventLog("callback_query.unauthorized", {
+              callbackQueryId: callbackQuery.id,
+              from: callbackQuery.from?.id,
+            });
+            await answerCallbackQuery(callbackQuery.id, "인증이 필요합니다.");
+            return Response.json({ ok: true }, { status: 200 });
+          }
+        }
+
+        const callbackChatId = callbackQuery.message?.chat?.id ?? callbackQuery.from.id;
+        if (!callbackChatId) {
+          await appendTelegramEventLog("callback_query.missing_chat", { callbackQueryId: callbackQuery.id });
+          await answerCallbackQuery(callbackQuery.id, "작업 폴더 선택에 필요한 chat 정보를 찾을 수 없습니다.");
+          return Response.json({ ok: true }, { status: 200 });
+        }
+
+        const selectedWorkspace = getTelegramWorkspaceBrowseSelection(callbackChatId, selectedWorkspaceIndex);
+        if (!selectedWorkspace) {
+          await appendTelegramEventLog("callback_query.workspace_state_missing", {
+            callbackQueryId: callbackQuery.id,
+            chatId: callbackChatId,
+            selectionIndex: selectedWorkspaceIndex,
+          });
+          await answerCallbackQuery(callbackQuery.id, "폴더 목록이 만료되었습니다. /workspace 를 다시 열어 주세요.");
+          return Response.json({ ok: true }, { status: 200 });
+        }
+
+        try {
+          await handleWorkspaceCommand(callbackChatId, selectedWorkspace);
+          await appendTelegramEventLog("callback_query.workspace_selected", {
+            callbackQueryId: callbackQuery.id,
+            chatId: callbackChatId,
+            workingDirectory: selectedWorkspace,
+          });
+          await answerCallbackQuery(callbackQuery.id, `작업 폴더 선택됨: ${selectedWorkspace}`);
+
+          if (callbackQuery.message && "message_id" in callbackQuery.message) {
+            await clearTelegramInlineKeyboard(callbackChatId, callbackQuery.message.message_id);
+            await editTelegramMessage(
+              callbackChatId,
+              callbackQuery.message.message_id,
+              [
+                "작업 폴더 선택 완료",
+                `선택 폴더: ${selectedWorkspace}`,
+                "이후 /new 와 /resume 에 적용됩니다.",
+              ].join("\n"),
+            );
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "작업 폴더 선택에 실패했습니다.";
+          await appendTelegramEventLog("callback_query.workspace_select_failed", {
+            callbackQueryId: callbackQuery.id,
+            chatId: callbackChatId,
+            workingDirectory: selectedWorkspace,
+            error: message,
+          });
+          await answerCallbackQuery(callbackQuery.id, `작업 폴더 선택 실패: ${message}`);
+        }
+
+        return Response.json({ ok: true }, { status: 200 });
+      }
+
       const parsedSessionId = parseResumeSessionCallbackData(callbackQuery.data);
       if (!parsedSessionId) {
         await appendTelegramEventLog("callback_query.parse_failed", {
@@ -2726,7 +3656,7 @@ export async function POST(request: Request): Promise<Response> {
           id: callbackQuery.id,
           data: callbackQuery.data,
         });
-        await answerCallbackQuery(callbackQuery.id, "알 수 없는 버튼입니다. /session으로 세션 목록을 다시 받아 주세요.");
+        await answerCallbackQuery(callbackQuery.id, "알 수 없는 버튼입니다. /session 또는 /workspace 를 다시 열어 주세요.");
         return Response.json({ ok: true }, { status: 200 });
       }
 
@@ -2801,6 +3731,16 @@ export async function POST(request: Request): Promise<Response> {
     const message = body.message ?? body.edited_message;
     if (!message) {
       return Response.json({ ok: true }, { status: 200 });
+    }
+
+    try {
+      await ensureTelegramMenuCommandsRegistered({ type: "chat", chat_id: message.chat.id });
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : "unknown";
+      await appendTelegramEventLog("telegram_menu.sync_failed", {
+        error: messageText,
+        scope: `chat:${message.chat.id}`,
+      });
     }
 
     const attachment = getIncomingAttachment(message);
@@ -2895,12 +3835,16 @@ export async function POST(request: Request): Promise<Response> {
           case "newSession":
             await handleNewSessionCommand(message.chat.id);
             return;
+          case "workspace":
+            await handleWorkspaceCommand(message.chat.id, command.workingDirectory);
+            return;
           case "resumeSession":
             await handleResumeSessionCommand(message.chat.id, command.selector, sessionId);
             return;
           case "status": {
             const session = await loadSession(sessionId);
             const sessionTitle = session.title?.trim() || "(미설정)";
+            const workingDirectory = await getSessionWorkingDirectoryLabel(sessionId);
             const model = getSessionModel(session.model);
             const reasoning = getSessionReasoning(session.reasoningEffort);
             const activeJobId = session.activeJobId;
@@ -2910,6 +3854,7 @@ export async function POST(request: Request): Promise<Response> {
                 [
                   `세션: ${sessionId}`,
                   `세션 제목: ${sessionTitle}`,
+                  `기본 작업 위치: ${workingDirectory || "(미설정)"}`,
                   "현재 진행 중인 작업이 없습니다.",
                   `모델: ${getModelLabel(model)} (${model})`,
                   `사고수준: ${formatReasoningLabel(reasoning)} (${reasoning})`,
@@ -2930,6 +3875,7 @@ export async function POST(request: Request): Promise<Response> {
               [
                 `세션: ${sessionId}`,
                 `세션 제목: ${sessionTitle}`,
+                `기본 작업 위치: ${workingDirectory || "(미설정)"}`,
                 `작업 상태: ${activeJob.status}`,
                 `작업 ID: ${activeJob.jobId}`,
                 `모델: ${getModelLabel(model)} (${model})`,
@@ -2953,7 +3899,7 @@ export async function POST(request: Request): Promise<Response> {
             await handleReasoningCommand(message.chat.id, sessionId, command.value);
             return;
           case "sessionInfo":
-            await handleSessionInfoCommand(message.chat.id, sessionId);
+            await handleSessionInfoCommand(message.chat.id, sessionId, command.query);
             return;
           case "sessionTitle":
             await handleSessionTitleCommand(message.chat.id, sessionId, command.value);

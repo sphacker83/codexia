@@ -19,6 +19,7 @@ import {
   loadExistingSession,
   loadSession,
   recordUserTurn,
+  getSessionWorkingDirectory,
   setSessionProviderSession,
   setSessionTitleIfMissing,
   setSessionActiveJob,
@@ -887,6 +888,7 @@ async function runJob(jobId: string): Promise<void> {
         reasoningEffort: job.reasoningEffort,
         jsonOutput: usesJsonOutput,
         sessionId: promptState.providerSessionId,
+        workingDirectory: await getSessionWorkingDirectory(job.sessionId),
       });
       runningJobCancels.set(job.jobId, runner.cancel);
 
