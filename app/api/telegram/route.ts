@@ -95,6 +95,9 @@ const TELEGRAM_SESSION_LIST_LIMIT = 10;
 const TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT = 48;
 const TELEGRAM_SESSION_RESUME_CALLBACK_PREFIX = "resume_session:";
 const TELEGRAM_WORKSPACE_SELECTION_CALLBACK_PREFIX = "workspace_select:";
+const TELEGRAM_MODEL_SELECTION_CALLBACK_PREFIX = "model_select:";
+const TELEGRAM_REASONING_SELECTION_CALLBACK_PREFIX = "reasoning_select:";
+const TELEGRAM_INLINE_MENU_CLOSE_CALLBACK_PREFIX = "menu_close:";
 const TELEGRAM_SESSION_ID_PREFIX = "tg_";
 const TELEGRAM_REASONING_LABELS: Record<string, string> = {
   minimal: "최소",
@@ -115,14 +118,12 @@ const SIGNAL_RECOMMENDATION_MAX_LIMIT = 10;
 const SIGNAL_DISCLOSURE_TEXT = "판단 보조용이며 자동매매/투자자문이 아닙니다.";
 const TELEGRAM_MENU_COMMANDS = [
   { command: "workspace", description: "작업 폴더 선택" },
-  { command: "status", description: "현재 세션 상태 확인" },
-  { command: "jobs", description: "최근 작업 목록 보기" },
-  { command: "session", description: "세션 목록 조회 및 전환" },
-  { command: "cancel", description: "진행 중 작업 취소" },
+  { command: "resume", description: "세션 목록 열기" },
   { command: "new", description: "새 세션 시작" },
-  { command: "model", description: "모델 목록 조회 및 변경" },
-  { command: "effort", description: "사고수준 목록 조회 및 변경" },
-  { command: "help", description: "전체 도움말 보기" },
+  { command: "stop", description: "실행 중 작업 중지" },
+  { command: "model", description: "모델 버튼 선택" },
+  { command: "effort", description: "사고수준 버튼 선택" },
+  { command: "help", description: "도움말 보기" },
 ] as const satisfies TelegramBotCommand[];
 
 function getEnvInt(name: string, defaultValue: number): number {
@@ -201,18 +202,6 @@ interface TelegramCallbackQuery {
   message?: TelegramMessage;
 }
 
-interface TelegramReplyKeyboardButton {
-  text: string;
-}
-
-interface TelegramReplyKeyboardMarkup {
-  keyboard: Array<Array<TelegramReplyKeyboardButton>>;
-  resize_keyboard?: boolean;
-  one_time_keyboard?: boolean;
-  selective?: boolean;
-  input_field_placeholder?: string;
-}
-
 interface TelegramReplyKeyboardRemove {
   remove_keyboard: true;
   selective?: boolean;
@@ -263,11 +252,12 @@ type ParsedTelegramCommand =
   | { kind: "asset"; ticker: string }
   | { kind: "signalStyle"; value?: string }
   | { kind: "newSession" }
+  | { kind: "fork" }
   | { kind: "workspace"; workingDirectory?: string }
   | { kind: "resumeSession"; selector: string }
   | { kind: "status" }
   | { kind: "jobs"; limit: number }
-  | { kind: "cancel" }
+  | { kind: "stop" }
   | { kind: "model"; value?: string }
   | { kind: "reasoning"; value?: string }
   | { kind: "sessionInfo"; query?: string }
@@ -1480,9 +1470,12 @@ function parseCommand(input: string): ParsedTelegramCommand {
         kind: "unknown",
         message: "`/jobs <1~20>` 형식으로 입력해 주세요. (예: /jobs 8)",
       };
+    case "stop":
+    case "x":
+      return { kind: "stop" };
     case "c":
     case "cancel":
-      return { kind: "cancel" };
+      return { kind: "stop" };
     case "h":
     case "help":
       return { kind: "help" };
@@ -1490,10 +1483,6 @@ function parseCommand(input: string): ParsedTelegramCommand {
       return { kind: "start", code: arg || undefined };
     case "status":
       return { kind: "status" };
-    case "s":
-    case "session":
-    case "settings":
-      return { kind: "sessionInfo", query: arg || undefined };
     case "clear":
     case "reset":
       return { kind: "clear" };
@@ -1521,6 +1510,8 @@ function parseCommand(input: string): ParsedTelegramCommand {
     case "workspace":
     case "ws":
       return { kind: "workspace", workingDirectory: arg || undefined };
+    case "fork":
+      return { kind: "fork" };
     case "n":
     case "new":
       return { kind: "newSession" };
@@ -1529,14 +1520,9 @@ function parseCommand(input: string): ParsedTelegramCommand {
       return { kind: "sessionTitle", value: arg || undefined };
     case "r":
     case "resume":
-      if (!arg) {
-        return {
-          kind: "unknown",
-          message:
-            "`/resume <번호|세션ID>` 형식으로 입력해 주세요. (예: /resume 2, /resume tg_12345_abc...)",
-        };
-      }
-      return { kind: "resumeSession", selector: arg };
+      return arg
+        ? { kind: "resumeSession", selector: arg }
+        : { kind: "sessionInfo", query: undefined };
     case "log":
     case "logs":
       if (!arg) {
@@ -1604,7 +1590,52 @@ function parseWorkspaceSelectionCallbackData(data: string): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-function buildSessionResumeReplyKeyboard(
+function parseModelSelectionCallbackData(data: string): string | null {
+  const raw = data.trim();
+  if (!raw.startsWith(TELEGRAM_MODEL_SELECTION_CALLBACK_PREFIX)) {
+    return null;
+  }
+
+  const value = raw.slice(TELEGRAM_MODEL_SELECTION_CALLBACK_PREFIX.length).trim();
+  return value || null;
+}
+
+function parseReasoningSelectionCallbackData(data: string): string | null {
+  const raw = data.trim();
+  if (!raw.startsWith(TELEGRAM_REASONING_SELECTION_CALLBACK_PREFIX)) {
+    return null;
+  }
+
+  const value = raw.slice(TELEGRAM_REASONING_SELECTION_CALLBACK_PREFIX.length).trim();
+  return value || null;
+}
+
+function parseInlineMenuCloseCallbackData(data: string): string | null {
+  const raw = data.trim();
+  if (!raw.startsWith(TELEGRAM_INLINE_MENU_CLOSE_CALLBACK_PREFIX)) {
+    return null;
+  }
+
+  const value = raw.slice(TELEGRAM_INLINE_MENU_CLOSE_CALLBACK_PREFIX.length).trim();
+  return value || null;
+}
+
+function withInlineMenuCloseButton(
+  markup: TelegramInlineKeyboardMarkup,
+  menuKey: string,
+): TelegramInlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      ...markup.inline_keyboard,
+      [{
+        text: "닫기",
+        callback_data: `${TELEGRAM_INLINE_MENU_CLOSE_CALLBACK_PREFIX}${menuKey}`,
+      }],
+    ],
+  };
+}
+
+function buildSessionResumeInlineKeyboard(
   sessions: Array<{
     sessionId: string;
     title?: string | null;
@@ -1612,44 +1643,22 @@ function buildSessionResumeReplyKeyboard(
     updatedAt: string;
   }>,
   currentSessionId: string,
-): TelegramReplyKeyboardMarkup {
-  const keyboard = sessions.map((item, index) => {
-    const isCurrent = item.sessionId === currentSessionId;
-    const fallbackLabel = `${formatTelegramJobTime(item.updatedAt)} · ${item.sessionId.slice(0, 8)}`;
-    const rawLabel = item.title?.trim() || item.lastMessagePreview?.trim() || fallbackLabel;
-    const displayLabel = rawLabel.length > TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT
-      ? `${rawLabel.slice(0, TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT)}...`
-      : rawLabel;
-    const commandPrefix = isCurrent ? `/resume ${index + 1} [현재]` : `/resume ${index + 1}`;
-    const safePrefix = `${commandPrefix} `;
-    const maxLabelLength = Math.max(1, 64 - safePrefix.length - 3);
-    const safeLabel = displayLabel.length > maxLabelLength
-      ? `${displayLabel.slice(0, maxLabelLength)}...`
-      : displayLabel;
-    const text = `${safePrefix}${safeLabel}`;
+): TelegramInlineKeyboardMarkup {
+  return withInlineMenuCloseButton({
+    inline_keyboard: sessions.map((item, index) => {
+      const isCurrent = item.sessionId === currentSessionId;
+      const fallbackLabel = `${formatTelegramJobTime(item.updatedAt)} · ${item.sessionId.slice(0, 8)}`;
+      const rawLabel = item.title?.trim() || item.lastMessagePreview?.trim() || fallbackLabel;
+      const displayLabel = rawLabel.length > TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT
+        ? `${rawLabel.slice(0, TELEGRAM_SESSION_LIST_PREVIEW_TEXT_LIMIT)}...`
+        : rawLabel;
 
-    return [{ text }];
-  });
-
-  return {
-    keyboard,
-    resize_keyboard: true,
-    one_time_keyboard: true,
-    input_field_placeholder: "버튼으로 세션 번호를 선택하세요",
-  };
-}
-
-function buildCommandSelectionReplyKeyboard(
-  options: Array<{ commandText: string }>,
-  placeholder: string,
-): TelegramReplyKeyboardMarkup {
-  const keyboard = options.map((option) => [{ text: option.commandText }]);
-  return {
-    keyboard,
-    resize_keyboard: true,
-    one_time_keyboard: true,
-    input_field_placeholder: placeholder,
-  };
+      return [{
+        text: `${index + 1}. ${displayLabel}${isCurrent ? " [현재]" : ""}`,
+        callback_data: `${TELEGRAM_SESSION_RESUME_CALLBACK_PREFIX}${encodeURIComponent(item.sessionId)}`,
+      }];
+    }),
+  }, "resume");
 }
 
 async function listTelegramWorkspaceDirectories(): Promise<string[]> {
@@ -1683,9 +1692,9 @@ function buildWorkspaceSelectionInlineKeyboard(
     inlineKeyboard.unshift([workspaceEntry]);
   }
 
-  return {
+  return withInlineMenuCloseButton({
     inline_keyboard: inlineKeyboard,
-  };
+  }, "workspace");
 }
 
 function setTelegramWorkspaceBrowseState(chatId: number, directories: string[]): void {
@@ -1710,62 +1719,60 @@ function getTelegramWorkspaceBrowseSelection(chatId: number, index: number): str
   return state.directories[index - 1] ?? null;
 }
 
-function buildModelReplyKeyboard(currentModel: string): TelegramReplyKeyboardMarkup {
-  return buildCommandSelectionReplyKeyboard(
-    SUPPORTED_MODELS.map((model, index) => {
+function buildModelInlineKeyboard(currentModel: string): TelegramInlineKeyboardMarkup {
+  return withInlineMenuCloseButton({
+    inline_keyboard: SUPPORTED_MODELS.map((model, index) => {
       const mark = model === currentModel ? " [현재]" : "";
-      return {
-        commandText: `/model ${index + 1} · ${getModelLabel(model)}${mark}`,
-      };
+      return [{
+        text: `${index + 1}. ${getModelLabel(model)}${mark}`,
+        callback_data: `${TELEGRAM_MODEL_SELECTION_CALLBACK_PREFIX}${model}`,
+      }];
     }),
-    "버튼으로 모델을 선택하세요",
-  );
+  }, "model");
 }
 
-function buildReasoningReplyKeyboard(currentReasoning: string): TelegramReplyKeyboardMarkup {
-  return buildCommandSelectionReplyKeyboard(
-    SUPPORTED_REASONING_EFFORTS.map((reasoning, index) => {
+function buildReasoningInlineKeyboard(currentReasoning: string): TelegramInlineKeyboardMarkup {
+  return withInlineMenuCloseButton({
+    inline_keyboard: SUPPORTED_REASONING_EFFORTS.map((reasoning, index) => {
       const mark = reasoning === currentReasoning ? " [현재]" : "";
-      return {
-        commandText: `/effort ${index + 1} · ${formatReasoningLabel(reasoning)}${mark}`,
-      };
+      return [{
+        text: `${index + 1}. ${formatReasoningLabel(reasoning)}${mark}`,
+        callback_data: `${TELEGRAM_REASONING_SELECTION_CALLBACK_PREFIX}${reasoning}`,
+      }];
     }),
-    "버튼으로 사고수준을 선택하세요",
-  );
+  }, "effort");
 }
 
 function formatHelpText(): string {
   const base = [
-    "명령어 안내:",
-    "메뉴 버튼 안내:",
-    "- /run <요청>: Codex에 바로 작업 전달",
-    "- /status: 현재 세션 상태 확인",
-    "- `/jobs [개수]`: 최근 작업 목록 빠르게 확인",
-    "- /c 또는 /cancel: 진행 중인 작업 취소",
-    "- /w 또는 /workspace: 기본 작업 폴더 선택",
-    "- /n 또는 /new: 새 세션 시작",
-    "- `/m`, `/model`, `/models`: 모델 목록 조회",
-    "- `/e`, `/effort`: 사고수준 목록 조회",
-    "- /h 또는 /help: 전체 도움말 다시 보기",
-    "- `/run` 없이 텍스트만 보내도 실행됩니다.",
+    "도움말",
     "",
-    "추가 명령:",
-    "- /s 또는 /session [키워드]: 세션 목록 조회 및 전환",
-    "- `/workspace <폴더>`: 기본 작업 폴더를 바로 지정",
-    "- `/m <번호|모델명>`, `/model <번호|모델명>`: 기본 모델 변경",
-    "- `/e <번호|사고수준>`, `/effort <번호|사고수준>`: 사고수준 변경",
-    "- `/recent [개수]`: 최근 대화 미리보기 (기본 6개)",
-    "- /resume <번호|세션ID>: 기존 세션으로 전환",
-    "- /sc 또는 /screencap [라벨]: 내 화면 캡처 후 이미지 전송",
-    "- /t 또는 /title <제목>: 현재 세션 제목 설정 (예: /title 버그 수정)",
-    "- /log [개수]: 최근 이벤트 로그 조회 (기본 40줄)",
-    "- /clear: 대화 기록 초기화",
-    "- /ping: 연결 테스트",
-    "- /id: 내 chat_id 확인",
+    "메뉴",
+    "/workspace 작업 폴더 선택",
+    "/resume 세션 목록 열기 또는 기존 세션 전환",
+    "/new 새 세션 시작",
+    "/stop 실행 중 작업 중지",
+    "/model 모델 버튼 선택",
+    "/effort 사고수준 버튼 선택",
+    "/help 이 안내 다시 보기",
+    "",
+    "추가",
+    "/status 현재 세션 상태 확인",
+    "/jobs [개수] 최근 작업 목록 확인",
+    "/fork 현재 세션을 새 분기 세션으로 복제",
+    "/model <번호|모델명> 모델 변경",
+    "/effort <번호|사고수준> 사고수준 변경",
+    "/sc 또는 /screencap [라벨] 화면 캡처 전송",
+    "/title <제목> 현재 세션 제목 설정",
+    "/clear 대화 기록 초기화",
+    "/ping 연결 테스트",
+    "/id 내 chat_id 확인",
+    "",
+    "텍스트만 보내도 바로 실행됩니다.",
   ];
 
   if (TELEGRAM_REGISTRATION_CODE) {
-    base.push("- /start <인증코드>: 인증 코드로 사용 승인");
+    base.push("", "/start <인증코드> 인증 코드로 사용 승인");
   }
 
   return base.join("\n");
@@ -2421,34 +2428,6 @@ async function sendTelegramMessageWithRemovedKeyboard(
   return { message_id: sentMessageId ?? 0 };
 }
 
-async function sendTelegramMessageWithReplyKeyboard(
-  chatId: number,
-  text: string,
-  replyMarkup: TelegramReplyKeyboardMarkup,
-): Promise<TelegramSentMessage> {
-  const chunks = buildTelegramFormattedChunks(text);
-  const chunksToSend = chunks.length > 0 ? chunks : [{
-    text: escapeTelegramHtml(text.slice(0, TELEGRAM_CHAT_TEXT_LIMIT)),
-    parseMode: "HTML" as const,
-  }];
-  let sentMessageId: number | null = null;
-
-  for (const [index, chunk] of chunksToSend.entries()) {
-    const prefix = chunksToSend.length > 1 ? `[${index + 1}/${chunksToSend.length}]\n` : "";
-    const body = `${prefix}${chunk.text}`;
-    const sent = await callTelegramApi<TelegramSentMessage>("sendMessage", {
-      chat_id: chatId,
-      text: body.slice(0, TELEGRAM_CHAT_TEXT_LIMIT),
-      disable_web_page_preview: true,
-      parse_mode: chunk.parseMode,
-      reply_markup: index === chunksToSend.length - 1 ? replyMarkup : undefined,
-    });
-    sentMessageId = sent.message_id;
-  }
-
-  return { message_id: sentMessageId ?? 0 };
-}
-
 async function sendTelegramMessageWithInlineKeyboard(
   chatId: number,
   text: string,
@@ -2788,6 +2767,23 @@ async function handleRunCommand(
   }
 }
 
+async function applyModelSelection(sessionId: string, value: string): Promise<string> {
+  const session = await loadSession(sessionId);
+  const currentModel = getSessionModel(session.model);
+  const nextModel = resolveModelByInput(value);
+
+  if (!nextModel) {
+    return `모델 선택에 실패했습니다: ${value}`;
+  }
+
+  if (nextModel === currentModel) {
+    return `현재 모델이 이미 ${getModelLabel(nextModel)}입니다.`;
+  }
+
+  await setSessionModel(sessionId, nextModel, session.reasoningEffort);
+  return `기본 모델을 ${getModelLabel(nextModel)} (${nextModel})로 변경했습니다.`;
+}
+
 async function handleModelCommand(
   chatId: number,
   sessionId: string,
@@ -2797,40 +2793,45 @@ async function handleModelCommand(
   const currentModel = getSessionModel(session.model);
 
   if (!value) {
-    await sendTelegramMessageWithReplyKeyboard(
+    await sendTelegramMessageWithInlineKeyboard(
       chatId,
       formatModelListText(currentModel),
-      buildModelReplyKeyboard(currentModel),
+      buildModelInlineKeyboard(currentModel),
     );
     return;
   }
 
-  const nextModel = resolveModelByInput(value);
-  if (!nextModel) {
-    await sendTelegramMessageWithReplyKeyboard(
+  const message = await applyModelSelection(sessionId, value);
+  if (message.startsWith("모델 선택에 실패했습니다:")) {
+    await sendTelegramMessageWithInlineKeyboard(
       chatId,
       [
-        `모델 선택에 실패했습니다: ${value}`,
+        message,
         formatModelListText(currentModel),
       ].join("\n"),
-      buildModelReplyKeyboard(currentModel),
+      buildModelInlineKeyboard(currentModel),
     );
     return;
   }
 
-  if (nextModel === currentModel) {
-    await sendTelegramMessageWithRemovedKeyboard(
-      chatId,
-      `현재 모델이 이미 ${getModelLabel(nextModel)}입니다.`,
-    );
-    return;
+  await sendTelegramMessageWithRemovedKeyboard(chatId, message);
+}
+
+async function applyReasoningSelection(sessionId: string, value: string): Promise<string> {
+  const session = await loadSession(sessionId);
+  const currentReasoning = getSessionReasoning(session.reasoningEffort);
+  const nextReasoning = resolveReasoningByInput(value);
+
+  if (!nextReasoning) {
+    return `사고수준 선택에 실패했습니다: ${value}`;
   }
 
-  await setSessionModel(sessionId, nextModel, session.reasoningEffort);
-  await sendTelegramMessageWithRemovedKeyboard(
-    chatId,
-    `기본 모델을 ${getModelLabel(nextModel)} (${nextModel})로 변경했습니다.`,
-  );
+  if (nextReasoning === currentReasoning) {
+    return `현재 사고수준이 이미 ${formatReasoningLabel(nextReasoning)}입니다.`;
+  }
+
+  await setSessionModel(sessionId, getSessionModel(session.model), nextReasoning);
+  return `사고수준을 ${formatReasoningLabel(nextReasoning)} (${nextReasoning})로 변경했습니다.`;
 }
 
 async function handleReasoningCommand(
@@ -2842,59 +2843,36 @@ async function handleReasoningCommand(
   const currentReasoning = getSessionReasoning(session.reasoningEffort);
 
   if (!value) {
-    await sendTelegramMessageWithReplyKeyboard(
+    await sendTelegramMessageWithInlineKeyboard(
       chatId,
       formatReasoningListText(currentReasoning),
-      buildReasoningReplyKeyboard(currentReasoning),
+      buildReasoningInlineKeyboard(currentReasoning),
     );
     return;
   }
 
-  const nextReasoning = resolveReasoningByInput(value);
-  if (!nextReasoning) {
-    await sendTelegramMessageWithReplyKeyboard(
+  const message = await applyReasoningSelection(sessionId, value);
+  if (message.startsWith("사고수준 선택에 실패했습니다:")) {
+    await sendTelegramMessageWithInlineKeyboard(
       chatId,
       [
-        `사고수준 선택에 실패했습니다: ${value}`,
+        message,
         formatReasoningListText(currentReasoning),
       ].join("\n"),
-      buildReasoningReplyKeyboard(currentReasoning),
+      buildReasoningInlineKeyboard(currentReasoning),
     );
     return;
   }
 
-  if (nextReasoning === currentReasoning) {
-    await sendTelegramMessageWithRemovedKeyboard(
-      chatId,
-      `현재 사고수준이 이미 ${formatReasoningLabel(nextReasoning)}입니다.`,
-    );
-    return;
-  }
-
-  await setSessionModel(sessionId, getSessionModel(session.model), nextReasoning);
-  await sendTelegramMessageWithRemovedKeyboard(
-    chatId,
-    `사고수준을 ${formatReasoningLabel(nextReasoning)} (${nextReasoning})로 변경했습니다.`,
-  );
+  await sendTelegramMessageWithRemovedKeyboard(chatId, message);
 }
 
 async function handleSessionInfoCommand(chatId: number, sessionId: string, query?: string): Promise<void> {
-  const session = await loadSession(sessionId);
-  const currentTitle = session.title?.trim();
-  const selectedWorkspace = await getChatWorkspaceSelection(chatId);
   const workingDirectory = await getSessionWorkingDirectoryLabel(sessionId);
-  const model = getSessionModel(session.model);
-  const reasoning = getSessionReasoning(session.reasoningEffort);
-  const traceMode = getTraceMode(sessionId) ? "ON" : "OFF";
-  const active = session.activeJobId ? "진행중" : "없음";
   const sessions = filterTelegramResumeSessions(await listChatScopedResumeSessions(chatId), query);
   const targets = sessions.slice(0, TELEGRAM_SESSION_LIST_LIMIT);
   setTelegramSessionBrowseState(chatId, query, targets.map((item) => item.sessionId));
 
-  const currentSessionLine = `현재 세션: ${sessionId}`;
-  const selectionHelp = query?.trim()
-    ? `필터: ${query.trim()} · 총 ${sessions.length}개 중 ${targets.length}개 표시`
-    : `작업 폴더 ${selectedWorkspace || "(미선택)"} 기준 최근 ${targets.length}개 / 전체 ${sessions.length}개`;
   let selectorIndex = 1;
   const selectorLines = targets.length > 0
     ? targets.map((item) => {
@@ -2905,28 +2883,17 @@ async function handleSessionInfoCommand(chatId: number, sessionId: string, query
     : [query?.trim() ? "(일치하는 세션 없음)" : "(표시할 세션 없음)"];
 
   const body = [
-    currentSessionLine,
-    `현재 세션 제목: ${currentTitle || "(미설정)"}`,
-    `선택 작업 폴더: ${selectedWorkspace || "(미설정)"}`,
     `기본 작업 위치: ${workingDirectory || "(미설정)"}`,
-    `모델: ${getModelLabel(model)} (${model})`,
-    `사고수준: ${formatReasoningLabel(reasoning)} (${reasoning})`,
-    `트레이스: ${traceMode}`,
-    `진행 작업: ${active}`,
-    `대화 메시지: ${session.messages.length}개`,
     "",
-    selectionHelp,
-    "",
-    "번호를 탭하면 즉시 전환됩니다. (/resume 1 형태로 즉시 실행)",
     ...selectorLines,
   ].join("\n");
 
   if (targets.length === 0) {
-    await sendTelegramMessage(chatId, `${body}\n(최근 세션 없음)`);
+    await sendTelegramMessage(chatId, body);
     return;
   }
 
-  const replyKeyboard = buildSessionResumeReplyKeyboard(
+  const inlineKeyboard = buildSessionResumeInlineKeyboard(
     targets.map((item) => ({
       sessionId: item.sessionId,
       title: item.title,
@@ -2936,10 +2903,10 @@ async function handleSessionInfoCommand(chatId: number, sessionId: string, query
     sessionId,
   );
 
-  await sendTelegramMessageWithReplyKeyboard(
+  await sendTelegramMessageWithInlineKeyboard(
     chatId,
-    `${body}\n${query?.trim() ? "같은 필터 기준으로 /resume 1 처럼 바로 선택할 수 있습니다." : "아래 버튼으로 바로 전환"}`,
-    replyKeyboard,
+    body,
+    inlineKeyboard,
   );
 }
 
@@ -3193,7 +3160,7 @@ async function handleResumeSessionCallback(
       targetSessionId,
       switched: false,
       found: false,
-      message: "요청한 세션을 찾을 수 없습니다. /session을 다시 열어 최신 목록에서 선택해 주세요.",
+      message: "요청한 세션을 찾을 수 없습니다. /resume 을 다시 열어 최신 목록에서 선택해 주세요.",
     };
   }
 
@@ -3231,7 +3198,7 @@ async function handleResumeSessionCommand(
   if (!selectedSessionId) {
     await sendTelegramMessage(
       chatId,
-      `세션 선택 실패: ${trimmed}\n/session 목록에서 번호(1~${targets.length}) 또는 정확한 세션 ID로 선택해 주세요.`,
+      `세션 선택 실패: ${trimmed}\n/resume 목록에서 번호(1~${targets.length}) 또는 정확한 세션 ID로 선택해 주세요.`,
     );
     return;
   }
@@ -3245,7 +3212,7 @@ async function handleEventLogCommand(chatId: number, count?: number): Promise<vo
   if (lines.length === 0) {
     await sendTelegramMessage(
       chatId,
-      "로그 파일이 비어 있거나 아직 생성되지 않았습니다. `/session` 버튼을 눌러도 반응이 없으면 재현 시점을 다시 보내 주세요.",
+      "로그 파일이 비어 있거나 아직 생성되지 않았습니다. `/resume` 버튼을 눌러도 반응이 없으면 재현 시점을 다시 보내 주세요.",
     );
     return;
   }
@@ -3437,6 +3404,40 @@ async function handleNewSessionCommand(chatId: number): Promise<void> {
   );
 }
 
+async function handleForkSessionCommand(chatId: number, sourceSessionId: string): Promise<void> {
+  const sourceSession = await loadSession(sourceSessionId);
+  const nextSessionId = createNewSessionId(chatId);
+  const timestamp = new Date().toISOString();
+
+  await writeSessionFile(nextSessionId, {
+    ...sourceSession,
+    sessionId: nextSessionId,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    activeJobId: undefined,
+    providerSessionId: undefined,
+    providerSessionProvider: undefined,
+    messages: [...sourceSession.messages],
+  });
+
+  const workingDirectory = await getSessionWorkingDirectoryLabel(sourceSessionId);
+  if (workingDirectory) {
+    await setSessionWorkingDirectory(nextSessionId, workingDirectory);
+  }
+
+  await setSessionOverride(chatId, nextSessionId);
+  await sendTelegramMessage(
+    chatId,
+    [
+      "세션을 분기했습니다.",
+      `원본 세션: ${sourceSessionId}`,
+      `새 세션: ${nextSessionId}`,
+      ...(workingDirectory ? [`기본 작업 위치: ${workingDirectory}`] : []),
+      "이후 메시지는 새 분기 세션에서 이어집니다.",
+    ].join("\n"),
+  );
+}
+
 async function handleLocalScreenshotCommand(chatId: number, target?: string): Promise<void> {
   const progress = await sendTelegramMessage(
     chatId,
@@ -3575,7 +3576,7 @@ export async function POST(request: Request): Promise<Response> {
         await appendTelegramEventLog("callback_query.missing_data", {
           callbackQueryId: callbackQuery.id,
         });
-        await answerCallbackQuery(callbackQuery.id, "버튼 데이터가 없습니다. /session을 다시 열어 주세요.");
+        await answerCallbackQuery(callbackQuery.id, "버튼 데이터가 없습니다. /resume 을 다시 열어 주세요.");
         return Response.json({ ok: true }, { status: 200 });
       }
 
@@ -3622,15 +3623,6 @@ export async function POST(request: Request): Promise<Response> {
 
           if (callbackQuery.message && "message_id" in callbackQuery.message) {
             await clearTelegramInlineKeyboard(callbackChatId, callbackQuery.message.message_id);
-            await editTelegramMessage(
-              callbackChatId,
-              callbackQuery.message.message_id,
-              [
-                "작업 폴더 선택 완료",
-                `선택 폴더: ${selectedWorkspace}`,
-                "이후 /new 와 /resume 에 적용됩니다.",
-              ].join("\n"),
-            );
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : "작업 폴더 선택에 실패했습니다.";
@@ -3646,6 +3638,141 @@ export async function POST(request: Request): Promise<Response> {
         return Response.json({ ok: true }, { status: 200 });
       }
 
+      const closedMenu = parseInlineMenuCloseCallbackData(callbackQuery.data);
+      if (closedMenu) {
+        if (TELEGRAM_AUTH_REQUIRED) {
+          const authorized = await isAuthorizedChat(callbackQuery.from.id);
+          if (!authorized) {
+            await appendTelegramEventLog("callback_query.unauthorized", {
+              callbackQueryId: callbackQuery.id,
+              from: callbackQuery.from?.id,
+            });
+            await answerCallbackQuery(callbackQuery.id, "인증이 필요합니다.");
+            return Response.json({ ok: true }, { status: 200 });
+          }
+        }
+
+        const callbackChatId = callbackQuery.message?.chat?.id ?? callbackQuery.from.id;
+        if (!callbackChatId) {
+          await appendTelegramEventLog("callback_query.missing_chat", { callbackQueryId: callbackQuery.id });
+          await answerCallbackQuery(callbackQuery.id, "메뉴 닫기에 필요한 chat 정보를 찾을 수 없습니다.");
+          return Response.json({ ok: true }, { status: 200 });
+        }
+
+        const closeLabelMap: Record<string, string> = {
+          workspace: "작업 폴더",
+          resume: "세션 목록",
+          model: "모델 선택",
+          effort: "사고수준 선택",
+        };
+        const closeLabel = closeLabelMap[closedMenu] || "메뉴";
+        await appendTelegramEventLog("callback_query.menu_closed", {
+          callbackQueryId: callbackQuery.id,
+          chatId: callbackChatId,
+          menu: closedMenu,
+        });
+        await answerCallbackQuery(callbackQuery.id, `${closeLabel} 메뉴를 닫았습니다.`);
+
+        if (callbackQuery.message && "message_id" in callbackQuery.message) {
+          await clearTelegramInlineKeyboard(callbackChatId, callbackQuery.message.message_id);
+          await editTelegramMessage(
+            callbackChatId,
+            callbackQuery.message.message_id,
+            `${closeLabel} 메뉴를 닫았습니다.`,
+          );
+        }
+
+        return Response.json({ ok: true }, { status: 200 });
+      }
+
+      const selectedModel = parseModelSelectionCallbackData(callbackQuery.data);
+      if (selectedModel) {
+        if (TELEGRAM_AUTH_REQUIRED) {
+          const authorized = await isAuthorizedChat(callbackQuery.from.id);
+          if (!authorized) {
+            await appendTelegramEventLog("callback_query.unauthorized", {
+              callbackQueryId: callbackQuery.id,
+              from: callbackQuery.from?.id,
+            });
+            await answerCallbackQuery(callbackQuery.id, "인증이 필요합니다.");
+            return Response.json({ ok: true }, { status: 200 });
+          }
+        }
+
+        const callbackChatId = callbackQuery.message?.chat?.id ?? callbackQuery.from.id;
+        if (!callbackChatId) {
+          await appendTelegramEventLog("callback_query.missing_chat", { callbackQueryId: callbackQuery.id });
+          await answerCallbackQuery(callbackQuery.id, "모델 선택에 필요한 chat 정보를 찾을 수 없습니다.");
+          return Response.json({ ok: true }, { status: 200 });
+        }
+
+        try {
+          const targetSessionId = await getSessionIdForChat(callbackChatId);
+          const resultMessage = await applyModelSelection(targetSessionId, selectedModel);
+          await answerCallbackQuery(callbackQuery.id, resultMessage);
+
+          if (callbackQuery.message && "message_id" in callbackQuery.message) {
+            await clearTelegramInlineKeyboard(callbackChatId, callbackQuery.message.message_id);
+            await editTelegramMessage(callbackChatId, callbackQuery.message.message_id, resultMessage);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "모델 선택에 실패했습니다.";
+          await appendTelegramEventLog("callback_query.model_select_failed", {
+            callbackQueryId: callbackQuery.id,
+            chatId: callbackChatId,
+            model: selectedModel,
+            error: message,
+          });
+          await answerCallbackQuery(callbackQuery.id, `모델 선택 실패: ${message}`);
+        }
+
+        return Response.json({ ok: true }, { status: 200 });
+      }
+
+      const selectedReasoning = parseReasoningSelectionCallbackData(callbackQuery.data);
+      if (selectedReasoning) {
+        if (TELEGRAM_AUTH_REQUIRED) {
+          const authorized = await isAuthorizedChat(callbackQuery.from.id);
+          if (!authorized) {
+            await appendTelegramEventLog("callback_query.unauthorized", {
+              callbackQueryId: callbackQuery.id,
+              from: callbackQuery.from?.id,
+            });
+            await answerCallbackQuery(callbackQuery.id, "인증이 필요합니다.");
+            return Response.json({ ok: true }, { status: 200 });
+          }
+        }
+
+        const callbackChatId = callbackQuery.message?.chat?.id ?? callbackQuery.from.id;
+        if (!callbackChatId) {
+          await appendTelegramEventLog("callback_query.missing_chat", { callbackQueryId: callbackQuery.id });
+          await answerCallbackQuery(callbackQuery.id, "사고수준 선택에 필요한 chat 정보를 찾을 수 없습니다.");
+          return Response.json({ ok: true }, { status: 200 });
+        }
+
+        try {
+          const targetSessionId = await getSessionIdForChat(callbackChatId);
+          const resultMessage = await applyReasoningSelection(targetSessionId, selectedReasoning);
+          await answerCallbackQuery(callbackQuery.id, resultMessage);
+
+          if (callbackQuery.message && "message_id" in callbackQuery.message) {
+            await clearTelegramInlineKeyboard(callbackChatId, callbackQuery.message.message_id);
+            await editTelegramMessage(callbackChatId, callbackQuery.message.message_id, resultMessage);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "사고수준 선택에 실패했습니다.";
+          await appendTelegramEventLog("callback_query.reasoning_select_failed", {
+            callbackQueryId: callbackQuery.id,
+            chatId: callbackChatId,
+            reasoning: selectedReasoning,
+            error: message,
+          });
+          await answerCallbackQuery(callbackQuery.id, `사고수준 선택 실패: ${message}`);
+        }
+
+        return Response.json({ ok: true }, { status: 200 });
+      }
+
       const parsedSessionId = parseResumeSessionCallbackData(callbackQuery.data);
       if (!parsedSessionId) {
         await appendTelegramEventLog("callback_query.parse_failed", {
@@ -3656,7 +3783,7 @@ export async function POST(request: Request): Promise<Response> {
           id: callbackQuery.id,
           data: callbackQuery.data,
         });
-        await answerCallbackQuery(callbackQuery.id, "알 수 없는 버튼입니다. /session 또는 /workspace 를 다시 열어 주세요.");
+        await answerCallbackQuery(callbackQuery.id, "알 수 없는 버튼입니다. /resume, /workspace, /model, /effort 를 다시 열어 주세요.");
         return Response.json({ ok: true }, { status: 200 });
       }
 
@@ -3716,11 +3843,7 @@ export async function POST(request: Request): Promise<Response> {
 
       try {
         if (callbackQuery.message && "message_id" in callbackQuery.message) {
-          await editTelegramMessage(
-            callbackChatId,
-            callbackQuery.message.message_id,
-            `${summarizeResumeSessionResult(switchResult)}\n${switchResult.message}`,
-          );
+          await clearTelegramInlineKeyboard(callbackChatId, callbackQuery.message.message_id);
         }
       } catch {
         // fallback noop
@@ -3835,6 +3958,9 @@ export async function POST(request: Request): Promise<Response> {
           case "newSession":
             await handleNewSessionCommand(message.chat.id);
             return;
+          case "fork":
+            await handleForkSessionCommand(message.chat.id, sessionId);
+            return;
           case "workspace":
             await handleWorkspaceCommand(message.chat.id, command.workingDirectory);
             return;
@@ -3889,7 +4015,7 @@ export async function POST(request: Request): Promise<Response> {
           case "jobs":
             await handleJobsCommand(message.chat.id, sessionId, command.limit);
             return;
-          case "cancel":
+          case "stop":
             await handleCancelCommand(message.chat.id, sessionId);
             return;
           case "model":
