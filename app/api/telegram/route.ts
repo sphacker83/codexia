@@ -3063,17 +3063,28 @@ async function buildCrossSessionCompletionNotice(chatId: number, targetSessionId
 }
 
 function buildSessionSwitchedText(
+  previousSessionId: string,
+  previousSessionTitle: string | null,
   targetSessionId: string,
   targetSessionTitle: string | null,
   switched: boolean,
 ): string {
-  const titleLine = `세션 제목: ${formatSessionTitleLabel(targetSessionTitle)}`;
-
   if (!switched) {
-    return `이미 현재 세션입니다: ${targetSessionId}\n${titleLine}`;
+    return [
+      "이미 현재 세션입니다.",
+      `현재 세션: ${targetSessionId}`,
+      `현재 제목: ${formatSessionTitleLabel(targetSessionTitle)}`,
+    ].join("\n");
   }
 
-  return `세션을 전환했습니다.\n현재 세션: ${targetSessionId}\n${titleLine}\n이제부터 이 세션 컨텍스트에서 계속 진행됩니다.`;
+  return [
+    "세션을 전환했습니다.",
+    `이전 세션: ${previousSessionId}`,
+    `이전 제목: ${formatSessionTitleLabel(previousSessionTitle)}`,
+    `현재 세션: ${targetSessionId}`,
+    `현재 제목: ${formatSessionTitleLabel(targetSessionTitle)}`,
+    "이제부터 이 세션 컨텍스트에서 계속 진행됩니다.",
+  ].join("\n");
 }
 
 async function switchSession(
@@ -3104,10 +3115,18 @@ async function switchSession(
       targetSessionTitle,
       switched: false,
       found: true,
-      message: buildSessionSwitchedText(targetSessionId, targetSessionTitle, false),
+      message: buildSessionSwitchedText(
+        currentSessionId,
+        targetSessionTitle,
+        targetSessionId,
+        targetSessionTitle,
+        false,
+      ),
     };
   }
 
+  const currentSession = await loadSession(currentSessionId);
+  const currentSessionTitle = currentSession.title?.trim() || null;
   const targetSession = await loadSession(targetSessionId);
   const selectedWorkingDirectory = await getChatWorkspaceSelection(chatId);
   if (selectedWorkingDirectory) {
@@ -3131,8 +3150,20 @@ async function switchSession(
     switched: true,
     found: true,
     message: completionNotice
-      ? `${buildSessionSwitchedText(targetSessionId, targetSessionTitle, true)}\n\n${completionNotice}`
-      : buildSessionSwitchedText(targetSessionId, targetSessionTitle, true),
+      ? `${buildSessionSwitchedText(
+          currentSessionId,
+          currentSessionTitle,
+          targetSessionId,
+          targetSessionTitle,
+          true,
+        )}\n\n${completionNotice}`
+      : buildSessionSwitchedText(
+          currentSessionId,
+          currentSessionTitle,
+          targetSessionId,
+          targetSessionTitle,
+          true,
+        ),
   };
 }
 
@@ -3357,27 +3388,35 @@ async function handleWorkspaceCommand(chatId: number, workingDirectory?: string)
     return;
   }
 
-  const workspaceDirectories = await listTelegramWorkspaceDirectories();
-  if (!workspaceDirectories.includes(normalizedWorkingDirectory)) {
+  try {
+    await setWorkspaceSelection(chatId, normalizedWorkingDirectory);
     await sendTelegramMessage(
       chatId,
       [
-        `작업 폴더를 찾지 못했습니다: ${normalizedWorkingDirectory}`,
+        "기본 작업 폴더를 설정했습니다.",
+        `선택 폴더: ${normalizedWorkingDirectory}`,
+        "이후 /new 와 /resume 에 적용됩니다.",
+      ].join("\n"),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "작업 폴더 설정에 실패했습니다.";
+    await sendTelegramMessage(
+      chatId,
+      [
+        message,
         "메뉴에서 선택하거나 `/workspace <폴더명>` 형식으로 다시 입력해 주세요.",
       ].join("\n"),
     );
-    return;
+  }
+}
+
+async function setWorkspaceSelection(chatId: number, normalizedWorkingDirectory: string): Promise<void> {
+  const workspaceDirectories = await listTelegramWorkspaceDirectories();
+  if (!workspaceDirectories.includes(normalizedWorkingDirectory)) {
+    throw new Error(`작업 폴더를 찾지 못했습니다: ${normalizedWorkingDirectory}`);
   }
 
   await setChatWorkspaceSelection(chatId, normalizedWorkingDirectory);
-  await sendTelegramMessage(
-    chatId,
-    [
-      "기본 작업 폴더를 설정했습니다.",
-      `선택 폴더: ${normalizedWorkingDirectory}`,
-      "이후 /new 와 /resume 에 적용됩니다.",
-    ].join("\n"),
-  );
 }
 
 async function handleNewSessionCommand(chatId: number): Promise<void> {
@@ -3613,7 +3652,7 @@ export async function POST(request: Request): Promise<Response> {
         }
 
         try {
-          await handleWorkspaceCommand(callbackChatId, selectedWorkspace);
+          await setWorkspaceSelection(callbackChatId, selectedWorkspace);
           await appendTelegramEventLog("callback_query.workspace_selected", {
             callbackQueryId: callbackQuery.id,
             chatId: callbackChatId,
@@ -3623,6 +3662,15 @@ export async function POST(request: Request): Promise<Response> {
 
           if (callbackQuery.message && "message_id" in callbackQuery.message) {
             await clearTelegramInlineKeyboard(callbackChatId, callbackQuery.message.message_id);
+            await editTelegramMessage(
+              callbackChatId,
+              callbackQuery.message.message_id,
+              [
+                "작업 폴더 선택 완료",
+                `선택 폴더: ${selectedWorkspace}`,
+                "이후 /new 와 /resume 에 적용됩니다.",
+              ].join("\n"),
+            );
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : "작업 폴더 선택에 실패했습니다.";
@@ -3837,13 +3885,14 @@ export async function POST(request: Request): Promise<Response> {
 
       await answerCallbackQuery(callbackQuery.id, summarizeResumeSessionResult(switchResult));
 
-      if (switchResult.message) {
-        await sendTelegramMessageWithRemovedKeyboard(callbackChatId, switchResult.message);
-      }
-
       try {
         if (callbackQuery.message && "message_id" in callbackQuery.message) {
           await clearTelegramInlineKeyboard(callbackChatId, callbackQuery.message.message_id);
+          await editTelegramMessage(
+            callbackChatId,
+            callbackQuery.message.message_id,
+            switchResult.message,
+          );
         }
       } catch {
         // fallback noop

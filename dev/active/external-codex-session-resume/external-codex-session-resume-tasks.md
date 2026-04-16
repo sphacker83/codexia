@@ -30,7 +30,8 @@ Last Updated: 2026-04-17
 - [x] Telegram 공식 중지 명령을 `/stop`으로 바꾸고 `/cancel`은 별칭으로만 유지한다.
 - [x] Telegram inline 메뉴들에 공통 `닫기` 버튼을 추가한다.
 - [x] Telegram 세션 전환 후 이전 세션 picker 메시지는 갱신하지 않고 버튼만 제거한다.
-- [x] Telegram 작업 폴더 선택 후 이전 workspace picker 메시지는 갱신하지 않고 버튼만 제거한다.
+- [x] Telegram 세션 전환 후 기존 picker 메시지를 갱신하고, 이전/현재 세션 제목을 함께 표시한다.
+- [x] Telegram 작업 폴더 선택 후 이전 workspace picker 메시지를 갱신하고 새 메시지는 보내지 않는다.
 - [x] Telegram `/fork` 명령으로 현재 세션을 새 분기 세션으로 복제한다.
 - [x] Telegram `/new`가 workspace root 폴더 picker를 띄우고, 선택 결과를 새 세션 기본 작업 위치로 저장하도록 연결한다.
 - [x] 세션 기본 작업 디렉터리를 실제 CLI spawn `cwd`에 연결한다.

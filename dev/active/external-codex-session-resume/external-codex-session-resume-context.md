@@ -22,7 +22,8 @@ Last Updated: 2026-04-17
 - Telegram `/stop`을 공식 중지 명령으로 올리고, 기존 `/cancel`은 숨은 별칭으로만 유지했다.
 - Telegram `workspace/resume/model/effort` inline 메뉴에는 공통 `닫기` 버튼을 추가해, 사용자가 메시지 안에서 바로 메뉴를 접을 수 있게 했다.
 - Telegram 세션 전환 후에는 새 안내 메시지를 보내고, 이전 세션 picker 메시지는 내용 갱신 없이 inline 버튼만 제거하도록 단순화했다.
-- Telegram 작업 폴더 선택 후에도 새 안내 메시지를 보내고, 이전 workspace picker 메시지는 내용 갱신 없이 inline 버튼만 제거하도록 맞췄다.
+- Telegram 세션 전환 후에는 새 메시지를 보내지 않고 기존 picker 메시지를 갱신하며, 이전 세션/제목과 현재 세션/제목을 함께 보여주도록 바꿨다.
+- Telegram 작업 폴더 선택 후에는 새 안내 메시지를 추가로 보내지 않고, 이전 workspace picker 메시지를 `작업 폴더 선택 완료` 상태로 갱신하도록 맞췄다.
 - Telegram `/fork` 명령을 추가해 현재 세션의 메시지/설정/작업 위치를 새 세션으로 복제하되, provider resume 메타는 제거된 새 분기 세션으로 전환할 수 있게 했다.
 - Telegram의 `reply keyboard`/`remove keyboard` 전송이 첫 청크만 보내던 문제를 수정해서, 긴 `/session` 응답에서도 외부 세션 구간이 잘리지 않게 했다.
 - 제목이 비어 있는 외부 세션도 구분 가능하도록 텔레그램 목록 라벨을 `시간 | 라벨 | 세션ID 앞부분` 형식으로 바꿨다.
